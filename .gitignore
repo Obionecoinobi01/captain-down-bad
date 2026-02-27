@@ -1,0 +1,17 @@
+# Foundry
+cache/
+out/
+broadcast/
+
+# Node / skills
+node_modules/
+.skills/  # optional — ignore if symlinked
+
+# Secrets & env
+.env
+*.key
+*.pem
+
+# Temp / logs
+*.log
+*.tmp

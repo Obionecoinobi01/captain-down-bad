@@ -1,0 +1,503 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Ownable}         from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable}        from "@openzeppelin/contracts/utils/Pausable.sol";
+import {IERC20}          from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20}       from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
+/**
+ * @title  CaptainDownBad — Hunt For the Magical D
+ * @notice Fully on-chain turn-based pixel platformer on Base.
+ *         Captain Down Bad hunts glowing Magical D gems across neon pixel levels.
+ *
+ * @dev    Game loop: 60-second ticks, commit-reveal move scheme.
+ *         All player state packed into one uint256 storage slot.
+ *
+ *         Packed uint256 layout (high-to-low):
+ *           bits 255:248  posX       uint8   — horizontal tile position
+ *           bits 247:240  posY       uint8   — vertical tile position (0=top, 15=bottom)
+ *           bits 239:232  velY       int8    — physics velocity, positive=up, negative=down
+ *           bits 231:224  health     uint8
+ *           bits 223:216  animFrame  uint8
+ *           bits  55:0    score      uint56
+ *
+ *         Tile flags: 0=air 1=wall/platform 2=Magical-D-gem 3=spike 4=enemy
+ *         Gravity:    velY -= 1 per tick; terminal = -8
+ *         Positions:  posY increases downward (screen coords); velY physics sign → posY -= velY
+ */
+contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
+    using SafeERC20 for IERC20;
+
+    // -------------------------------------------------------------------------
+    // Constants
+    // -------------------------------------------------------------------------
+
+    /// @dev Native Base USDC
+    IERC20 public constant USDC = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
+
+    uint256 public constant TICK_DURATION      = 60;    // seconds per tick
+    uint256 public constant HOUSE_FEE_BPS      = 100;   // 1 %
+    uint256 public constant BPS_DENOM          = 10_000;
+    uint256 public constant REVEAL_WINDOW      = 2;     // ticks before commit expires
+    uint256 public constant LEVEL_WIDTH        = 32;
+    uint256 public constant LEVEL_HEIGHT       = 16;
+    uint8   public constant INITIAL_HEALTH     = 3;
+    int8    public constant JUMP_IMPULSE       = 4;
+    int8    public constant TERMINAL_VELOCITY  = -8;
+    uint256 public constant GEM_SCORE          = 100;
+    uint256 public constant ENEMY_SCORE        = 100; // defeating an enemy with Punch/Kick
+
+    // -------------------------------------------------------------------------
+    // Level 0 — row-major flat bytes constant
+    // -------------------------------------------------------------------------
+    //
+    //  512 bytes, row-major: LEVEL_MAP_BYTES[y * LEVEL_WIDTH + x] = tile at (x,y).
+    //  Tile key: 0=air  1=wall  2=gem  3=spike  4=enemy
+    //
+    //  Starter level (32 wide × 16 tall):
+    //    y=15           solid ground all columns
+    //    y= 9, x=8-14  floating platform
+    //    y= 8, x=10,12 Magical D gems (above platform)
+    //    y= 8, x= 8    enemy patrolling platform
+    //    y=11, x=16-22 second floating platform
+    //    y=10, x=18,20 Magical D gems (above second platform)
+    //    y=14, x= 5    spike trap near ground
+    //    y=14, x=25    spike trap near ground
+    //    y=14, x=15    enemy patrolling ground level
+    //
+    //  4 Magical D gems → LEVEL_0_GEM_COUNT = 4
+    //
+    // Row 8:  pos 16=enemy(04), 20=gem(02), 24=gem(02)
+    // Row 9:  pos 16-28=wall(01)
+    // Row 10: pos 36=gem(02), 40=gem(02)
+    // Row 11: pos 32-44=wall(01)
+    // Row 14: pos 10=spike(03), 30=enemy(04), 50=spike(03)
+    // Row 15: all wall(01)
+    //
+    bytes private constant LEVEL_MAP_BYTES = hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=0
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=1
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=2
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=3
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=4
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=5
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=6
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=7
+        hex"0000000000000000040002000200000000000000000000000000000000000000"  // y=8
+        hex"0000000000000000010101010101010000000000000000000000000000000000"  // y=9
+        hex"0000000000000000000000000000000000000200020000000000000000000000"  // y=10
+        hex"0000000000000000000000000000000001010101010101000000000000000000"  // y=11
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=12
+        hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=13
+        hex"0000000000030000000000000000000400000000000000000003000000000000"  // y=14
+        hex"0101010101010101010101010101010101010101010101010101010101010101"; // y=15
+
+    /// @dev Gem tile indices (row-major: y*LEVEL_WIDTH+x) for fast win check.
+    uint256 private constant GEM_IDX_0 = 8 * 32 + 10; // (10,  8)
+    uint256 private constant GEM_IDX_1 = 8 * 32 + 12; // (12,  8)
+    uint256 private constant GEM_IDX_2 = 10 * 32 + 18; // (18, 10)
+    uint256 private constant GEM_IDX_3 = 10 * 32 + 20; // (20, 10)
+    uint256 private constant LEVEL_0_GEM_COUNT = 4;
+
+    // -------------------------------------------------------------------------
+    // Packed state — bit positions
+    // -------------------------------------------------------------------------
+
+    uint256 private constant POS_X_SHIFT  = 248;
+    uint256 private constant POS_Y_SHIFT  = 240;
+    uint256 private constant VEL_Y_SHIFT  = 232;
+    uint256 private constant HEALTH_SHIFT = 224;
+    uint256 private constant ANIM_SHIFT   = 216;
+    uint256 private constant SCORE_MASK   = type(uint56).max; // bits 55:0
+
+    // -------------------------------------------------------------------------
+    // Tile flags
+    // -------------------------------------------------------------------------
+
+    uint8 private constant TILE_AIR   = 0;
+    uint8 private constant TILE_WALL  = 1;
+    uint8 private constant TILE_GEM   = 2; // Magical D — collect for score
+    uint8 private constant TILE_SPIKE = 3; // damage on contact
+    uint8 private constant TILE_ENEMY = 4; // enemy hit
+
+    // -------------------------------------------------------------------------
+    // Types
+    // -------------------------------------------------------------------------
+
+    /// @notice The six moves a player can submit per tick.
+    enum Move { Idle, Left, Right, Jump, Punch, Kick }
+
+    /**
+     * @notice Per-run state. One Run per session; new run = new runId.
+     * @param player         Address that owns this run.
+     * @param levelId        Which level is being played.
+     * @param bet            USDC entry fee (6 decimals).
+     * @param tick           Current game tick counter.
+     * @param revealDeadline Unix timestamp; reveal must arrive before this.
+     * @param commit         Pending move commitment hash (0 = none).
+     * @param playerState    Packed uint256 (see layout above).
+     * @param active         False once the run ends.
+     * @param finalScore     Populated on run end.
+     */
+    struct Run {
+        address player;
+        uint256 levelId;
+        uint256 bet;
+        uint256 tick;
+        uint256 revealDeadline;
+        bytes32 commit;
+        uint256 playerState;
+        bool    active;
+        uint256 finalScore;
+    }
+
+    // -------------------------------------------------------------------------
+    // Storage
+    // -------------------------------------------------------------------------
+
+    /// @notice All runs by ID.
+    mapping(uint256 => Run) public runs;
+    uint256 public nextRunId;
+
+    /// @notice Level tile data: levelId → LEVEL_WIDTH*LEVEL_HEIGHT bytes.
+    mapping(uint256 => bytes) public levels;
+
+    /// @dev Per-run consumed tiles (gems collected). Avoids mutating shared level data.
+    mapping(uint256 runId => mapping(uint256 tileIdx => bool)) private _cleared;
+
+    /// @notice Claimable by owner; accumulates entry fees from lost runs + house cuts.
+    uint256 public houseFees;
+
+    // -------------------------------------------------------------------------
+    // Events
+    // -------------------------------------------------------------------------
+
+    event RunStarted(uint256 indexed runId, address indexed player, uint256 bet, uint256 levelId);
+    event MoveCommitted(uint256 indexed runId, uint256 tick, bytes32 commitHash);
+    event MoveRevealed(uint256 indexed runId, uint256 tick, Move move);
+    event TickAdvanced(uint256 indexed runId, uint256 tick, uint256 playerState);
+    event GemCollected(uint256 indexed runId, uint8 posX, uint8 posY, uint256 newScore);
+    event RunEnded(uint256 indexed runId, address indexed player, uint256 payout, uint256 finalScore, bool won);
+    event LevelSet(uint256 indexed levelId);
+    event HouseFeesClaimed(address indexed to, uint256 amount);
+
+    // -------------------------------------------------------------------------
+    // Constructor
+    // -------------------------------------------------------------------------
+
+    constructor(address initialOwner) Ownable(initialOwner) {}
+
+    // -------------------------------------------------------------------------
+    // Player-facing functions
+    // -------------------------------------------------------------------------
+
+    /**
+     * @notice Start a new run. Transfers USDC entry fee from caller.
+     * @param bet     USDC amount (6 decimals). Must be > 0.
+     * @param levelId Level to play. Must have been seeded via setLevel.
+     */
+    function startRun(uint256 bet, uint256 levelId) external nonReentrant whenNotPaused {
+        require(bet > 0, "CDB: bet=0");
+        // Level 0 is built-in (LEVEL_MAP). Other levels must be loaded via setLevel.
+        require(
+            levelId == 0 || levels[levelId].length == LEVEL_WIDTH * LEVEL_HEIGHT,
+            "CDB: level not set"
+        );
+
+        USDC.safeTransferFrom(msg.sender, address(this), bet);
+
+        uint256 runId = nextRunId++;
+        runs[runId] = Run({
+            player:         msg.sender,
+            levelId:        levelId,
+            bet:            bet,
+            tick:           0,
+            revealDeadline: 0,
+            commit:         bytes32(0),
+            playerState:    _buildInitialState(),
+            active:         true,
+            finalScore:     0
+        });
+
+        emit RunStarted(runId, msg.sender, bet, levelId);
+    }
+
+    /**
+     * @notice Commit a move for the current tick.
+     *         commitHash = keccak256(abi.encodePacked(move, salt, msg.sender))
+     * @param runId      The run to commit for.
+     * @param commitHash Blinded commitment.
+     */
+    function commitMove(uint256 runId, bytes32 commitHash) external whenNotPaused {
+        Run storage run = runs[runId];
+        require(run.active,               "CDB: inactive");
+        require(run.player == msg.sender, "CDB: not your run");
+        require(run.commit == bytes32(0), "CDB: already committed");
+
+        run.commit         = commitHash;
+        run.revealDeadline = block.timestamp + TICK_DURATION * REVEAL_WINDOW;
+
+        emit MoveCommitted(runId, run.tick, commitHash);
+    }
+
+    /**
+     * @notice Reveal the committed move and advance the tick.
+     * @param runId The run ID.
+     * @param move  The move that was committed.
+     * @param salt  The salt used in the commitment.
+     */
+    function revealAndAdvance(
+        uint256 runId,
+        Move    move,
+        bytes32 salt
+    ) external nonReentrant whenNotPaused {
+        Run storage run = runs[runId];
+        require(run.active,                             "CDB: inactive");
+        require(run.player == msg.sender,               "CDB: not your run");
+        require(run.commit != bytes32(0),               "CDB: no commit");
+        require(block.timestamp <= run.revealDeadline,  "CDB: reveal expired");
+
+        bytes32 expected = keccak256(abi.encodePacked(move, salt, msg.sender));
+        require(run.commit == expected, "CDB: commit mismatch");
+
+        run.commit = bytes32(0);
+        emit MoveRevealed(runId, run.tick, move);
+
+        _advanceTick(runId, move);
+    }
+
+    /**
+     * @notice Advance a stalled run with Move.Idle after the reveal window expires.
+     *         Anyone may call — prevents bets being locked in a zombie run.
+     * @param runId The run ID.
+     */
+    function advanceExpired(uint256 runId) external nonReentrant whenNotPaused {
+        Run storage run = runs[runId];
+        require(run.active,                            "CDB: inactive");
+        require(run.commit != bytes32(0),              "CDB: no pending commit");
+        require(block.timestamp > run.revealDeadline,  "CDB: window still open");
+
+        run.commit = bytes32(0);
+        _advanceTick(runId, Move.Idle);
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal — tick logic
+    // -------------------------------------------------------------------------
+
+    /**
+     * @dev  Core game tick. Order: apply move → gravity → clamp → collision → repack.
+     *       Coordinate system: posY increases downward (0=top, 15=bottom).
+     *       velY uses physics sign (positive=up). Apply as: posY_new = posY - velY.
+     */
+    function _advanceTick(uint256 runId, Move move) internal {
+        Run storage run = runs[runId];
+        uint256 state = run.playerState;
+
+        // Unpack
+        uint8  posX      = _getPosX(state);
+        uint8  posY      = _getPosY(state);
+        int8   velY      = _getVelY(state);
+        uint8  health    = _getHealth(state);
+        uint8  animFrame = _getAnimFrame(state);
+        uint56 score     = _getScore(state);
+
+        // --- Horizontal move ---
+        if (move == Move.Left  && posX > 0)                           posX--;
+        if (move == Move.Right && posX < uint8(LEVEL_WIDTH  - 1))    posX++;
+
+        // --- Jump (only when grounded: velY == 0) ---
+        if (move == Move.Jump && velY == 0) velY = JUMP_IMPULSE;
+
+        // --- Gravity ---
+        unchecked { velY--; }                                   // velY -= 1
+        if (velY < TERMINAL_VELOCITY) velY = TERMINAL_VELOCITY; // clamp
+
+        // --- Apply vertical velocity (physics→screen: posY -= velY) ---
+        uint8 prevPosY = posY;
+        int16 nextY    = int16(uint16(posY)) - int16(velY);
+        if (nextY < 0)                             nextY = 0;
+        if (nextY >= int16(uint16(LEVEL_HEIGHT)))  nextY = int16(uint16(LEVEL_HEIGHT - 1));
+        posY = uint8(uint16(nextY));
+
+        // --- Tile collision ---
+        uint8 tile = _getTile(runId, posX, posY);
+
+        if (tile == TILE_WALL) {
+            posY = prevPosY; // revert vertical move into solid
+            velY = 0;        // land / hit ceiling
+        } else if (tile == TILE_GEM) {
+            score += uint56(GEM_SCORE);
+            _clearTile(runId, posX, posY);
+            emit GemCollected(runId, posX, posY, uint256(score));
+        } else if (tile == TILE_SPIKE) {
+            if (health > 0) health--;
+        } else if (tile == TILE_ENEMY) {
+            if (move == Move.Punch || move == Move.Kick) {
+                // Defeat the troll — award score and clear the tile.
+                score += uint56(ENEMY_SCORE);
+                _clearTile(runId, posX, posY);
+            } else {
+                // Contact damage — no attack means you take a hit.
+                if (health > 0) health--;
+            }
+        }
+
+        // --- Attack animation ---
+        if (move == Move.Punch || move == Move.Kick) {
+            animFrame = (animFrame + 1) % 4;
+        }
+
+        // --- Repack and store ---
+        state           = _buildState(posX, posY, velY, health, animFrame, score);
+        run.playerState = state;
+        run.tick++;
+
+        emit TickAdvanced(runId, run.tick, state);
+
+        // --- End conditions ---
+        if (health == 0) { _endRun(runId, false); return; }
+
+        // Win: all Magical D gems collected this run (level 0 built-in map only).
+        if (runs[runId].levelId == 0 && _gemsCleared(runId) == LEVEL_0_GEM_COUNT) {
+            _endRun(runId, true);
+            return;
+        }
+    }
+
+    /**
+     * @dev Resolve payouts. Won: score-based multiplier, 1 % house cut.
+     *      Lost: full bet goes to house.
+     */
+    function _endRun(uint256 runId, bool won) internal {
+        Run storage run = runs[runId];
+        run.active     = false;
+        run.finalScore = uint256(_getScore(run.playerState));
+
+        uint256 payout;
+
+        if (won) {
+            // multiplier = 1 + (finalScore / 10_000); expressed in bps
+            uint256 multiplierBps = BPS_DENOM + run.finalScore;
+            uint256 gross         = (run.bet * multiplierBps) / BPS_DENOM;
+            uint256 fee           = (gross * HOUSE_FEE_BPS)  / BPS_DENOM;
+            payout                = gross - fee;
+            houseFees            += fee;
+
+            // Cap at available balance (treasury may not fully cover high multipliers yet)
+            uint256 available = USDC.balanceOf(address(this)) - houseFees;
+            if (payout > available) payout = available;
+
+            USDC.safeTransfer(run.player, payout);
+        } else {
+            houseFees += run.bet;
+        }
+
+        emit RunEnded(runId, run.player, payout, run.finalScore, won);
+    }
+
+    // -------------------------------------------------------------------------
+    // Tile helpers
+    // -------------------------------------------------------------------------
+
+    function _getTile(uint256 runId, uint8 x, uint8 y) internal view returns (uint8) {
+        uint256 idx    = uint256(y) * LEVEL_WIDTH + uint256(x);
+        if (_cleared[runId][idx]) return TILE_AIR;
+        // Custom level data (set via setLevel) takes priority over the built-in constant.
+        bytes storage lvl = levels[runs[runId].levelId];
+        if (lvl.length == LEVEL_WIDTH * LEVEL_HEIGHT) return uint8(lvl[idx]);
+        // Fall back to built-in constant map (level 0).
+        if (runs[runId].levelId == 0) return getTile(x, y);
+        return TILE_AIR;
+    }
+
+    function _clearTile(uint256 runId, uint8 x, uint8 y) internal {
+        _cleared[runId][uint256(y) * LEVEL_WIDTH + uint256(x)] = true;
+    }
+
+    /**
+     * @notice Read a tile from the built-in level-0 constant map.
+     * @dev    Row-major: LEVEL_MAP_BYTES[y * LEVEL_WIDTH + x].
+     *         Returns TILE_AIR for out-of-bounds coordinates.
+     */
+    function getTile(uint8 x, uint8 y) public pure returns (uint8) {
+        if (x >= uint8(LEVEL_WIDTH) || y >= uint8(LEVEL_HEIGHT)) return TILE_AIR;
+        return uint8(LEVEL_MAP_BYTES[uint256(y) * LEVEL_WIDTH + uint256(x)]);
+    }
+
+    /**
+     * @dev Count gems cleared in this run (level 0 only).
+     *      Four storage reads; called once per tick only on gem-collect path.
+     */
+    function _gemsCleared(uint256 runId) internal view returns (uint256 count) {
+        if (_cleared[runId][GEM_IDX_0]) count++;
+        if (_cleared[runId][GEM_IDX_1]) count++;
+        if (_cleared[runId][GEM_IDX_2]) count++;
+        if (_cleared[runId][GEM_IDX_3]) count++;
+    }
+
+    // -------------------------------------------------------------------------
+    // Bit-packing helpers
+    // -------------------------------------------------------------------------
+
+    /// @dev Spawn at (2, 14): two tiles above the ground row.
+    function _buildInitialState() internal pure returns (uint256) {
+        return _buildState(2, 14, 0, INITIAL_HEALTH, 0, 0);
+    }
+
+    function _buildState(
+        uint8  posX,
+        uint8  posY,
+        int8   velY,
+        uint8  health,
+        uint8  animFrame,
+        uint56 score
+    ) internal pure returns (uint256) {
+        return (uint256(posX)        << POS_X_SHIFT)
+             | (uint256(posY)        << POS_Y_SHIFT)
+             | (uint256(uint8(velY)) << VEL_Y_SHIFT)
+             | (uint256(health)      << HEALTH_SHIFT)
+             | (uint256(animFrame)   << ANIM_SHIFT)
+             | uint256(score);
+    }
+
+    function _getPosX(uint256 s)      internal pure returns (uint8)  { return uint8(s  >> POS_X_SHIFT);  }
+    function _getPosY(uint256 s)      internal pure returns (uint8)  { return uint8(s  >> POS_Y_SHIFT);  }
+    function _getVelY(uint256 s)      internal pure returns (int8)   { return int8(uint8(s >> VEL_Y_SHIFT)); }
+    function _getHealth(uint256 s)    internal pure returns (uint8)  { return uint8(s  >> HEALTH_SHIFT); }
+    function _getAnimFrame(uint256 s) internal pure returns (uint8)  { return uint8(s  >> ANIM_SHIFT);   }
+    function _getScore(uint256 s)     internal pure returns (uint56) { return uint56(s  & SCORE_MASK);   }
+
+    // -------------------------------------------------------------------------
+    // Admin
+    // -------------------------------------------------------------------------
+
+    /**
+     * @notice Load or replace a level. Only owner.
+     * @param levelId  Arbitrary level identifier.
+     * @param tileData Exactly LEVEL_WIDTH * LEVEL_HEIGHT bytes of tile values (0-4).
+     */
+    function setLevel(uint256 levelId, bytes calldata tileData) external onlyOwner {
+        require(tileData.length == LEVEL_WIDTH * LEVEL_HEIGHT, "CDB: wrong level size");
+        levels[levelId] = tileData;
+        emit LevelSet(levelId);
+    }
+
+    /**
+     * @notice Withdraw accumulated house fees to `to`. Only owner.
+     */
+    function claimHouseFees(address to) external onlyOwner nonReentrant {
+        uint256 amount = houseFees;
+        houseFees      = 0;
+        USDC.safeTransfer(to, amount);
+        emit HouseFeesClaimed(to, amount);
+    }
+
+    /// @notice Pause all game actions.
+    function pause()   external onlyOwner { _pause();   }
+
+    /// @notice Unpause.
+    function unpause() external onlyOwner { _unpause(); }
+
+}
