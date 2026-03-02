@@ -34,8 +34,8 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     // Constants
     // -------------------------------------------------------------------------
 
-    /// @dev Native Base USDC
-    IERC20 public constant USDC = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
+    /// @dev USDC token — set at deploy time (mainnet: 0x833589…/ sepolia: 0x036CbD…)
+    IERC20 public immutable USDC;
 
     uint256 public constant TICK_DURATION      = 60;    // seconds per tick
     uint256 public constant HOUSE_FEE_BPS      = 100;   // 1 %
@@ -186,7 +186,9 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     // Constructor
     // -------------------------------------------------------------------------
 
-    constructor(address initialOwner) Ownable(initialOwner) {}
+    constructor(address initialOwner, address usdc) Ownable(initialOwner) {
+        USDC = IERC20(usdc);
+    }
 
     // -------------------------------------------------------------------------
     // Player-facing functions

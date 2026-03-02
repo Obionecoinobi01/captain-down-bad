@@ -8,7 +8,7 @@ import {CaptainDownBad} from "../src/CaptainDownBad.sol";
  *      Never deploy this contract to production.
  */
 contract CaptainDownBadHarness is CaptainDownBad {
-    constructor(address initialOwner) CaptainDownBad(initialOwner) {}
+    constructor(address initialOwner, address usdc) CaptainDownBad(initialOwner, usdc) {}
 
     /// @dev Directly invoke _endRun with either outcome for coverage of the won=true path.
     function exposed_endRun(uint256 runId, bool won) external {

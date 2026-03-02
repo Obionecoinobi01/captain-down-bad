@@ -73,7 +73,7 @@ contract CaptainDownBadTest is Test {
         usdc = MockERC20(USDC_ADDR);
 
         vm.prank(OWNER);
-        game = new CaptainDownBadHarness(OWNER);
+        game = new CaptainDownBadHarness(OWNER, USDC_ADDR);
     }
 
     // -------------------------------------------------------------------------
