@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { initRetroGL, DEFAULT_RETRO, type RetroGL } from './effects'
+import {
+  startMusic, stopMusic,
+  playGemCollect, playJump, playPunch, playKick,
+  playHurt, playEnemyDefeat, playGameOver, playWin,
+} from './sound'
 import { useRun, useGemEventFetcher } from './useGameState'
 import { useSessionKey } from './useSessionKey'
 import { useLocalPhysics } from './useLocalPhysics'
@@ -16,9 +22,13 @@ interface Props {
 }
 
 // ── Canvas config ──────────────────────────────────────────────────────────────
-const TILE = 8
-const COLS = 32
-const ROWS = 16
+const TILE       = 16          // px per tile — doubled from 8 for crisp detail
+const COLS       = 32          // level columns (physics / contract)
+const ROWS       = 16          // level rows    (physics / contract)
+const VIEWPORT_W = 20          // tiles visible horizontally (scrolling camera)
+const VIEWPORT_H = 12          // tiles visible vertically
+const CANVAS_W   = VIEWPORT_W * TILE   // 320
+const CANVAS_H   = VIEWPORT_H * TILE   // 192
 
 // ── Captain spritesheet layout (832×1248, 3 cols × 4 rows) ───────────────────
 const CELL_W = 277
@@ -29,8 +39,8 @@ const WALK_FRAMES = [0, 1, 2, 3, 4, 5].map(i => ({
 const PUNCH_FRAME = { sx: 0,      sy: CELL_H * 2, sw: CELL_W, sh: CELL_H }
 const KICK_FRAME  = { sx: CELL_W, sy: CELL_H * 2, sw: CELL_W, sh: CELL_H }
 const JUMP_FRAME  = { sx: CELL_W, sy: CELL_H * 3, sw: CELL_W, sh: CELL_H }
-const SPR_W = TILE * 2
-const SPR_H = TILE * 3
+const SPR_W = TILE * 2   // 32px
+const SPR_H = TILE * 3   // 48px
 
 // ── Enemy spritesheet layout (4 cols × 3 rows) ────────────────────────────────
 // Row 0: troll walk cycle (4 frames)
@@ -42,42 +52,43 @@ const ENEMY_ROWS = 3
 
 // ── Drawing helpers ────────────────────────────────────────────────────────────
 function drawTile(ctx: CanvasRenderingContext2D, tile: number, px: number, py: number, t: number) {
+  const s = TILE / 8   // scale factor: 2 when TILE=16
   switch (tile) {
     case 0: return
     case 1:
       ctx.fillStyle = '#1a2a4e'
       ctx.fillRect(px, py, TILE, TILE)
       ctx.fillStyle = '#2a3d72'
-      ctx.fillRect(px, py, TILE, 1)
-      ctx.fillRect(px, py, 1, TILE)
+      ctx.fillRect(px, py,            TILE, s)
+      ctx.fillRect(px, py,            s,    TILE)
       ctx.fillStyle = '#0d1a30'
-      ctx.fillRect(px, py + TILE - 1, TILE, 1)
+      ctx.fillRect(px, py + TILE - s, TILE, s)
       return
     case 2: {
       const b = (Math.sin(t * 0.08 + px * 0.4) + 1) * 0.5
       const a = (0.65 + b * 0.35).toFixed(2)
       ctx.fillStyle = `rgba(0,255,204,${a})`
-      ctx.fillRect(px + 2, py + 1, 4, 2)
-      ctx.fillRect(px + 1, py + 3, 6, 2)
-      ctx.fillRect(px + 2, py + 5, 4, 2)
+      ctx.fillRect(px + 2*s, py + 1*s, 4*s, 2*s)
+      ctx.fillRect(px + 1*s, py + 3*s, 6*s, 2*s)
+      ctx.fillRect(px + 2*s, py + 5*s, 4*s, 2*s)
       ctx.fillStyle = `rgba(200,255,255,${a})`
-      ctx.fillRect(px + 3, py + 2, 2, 2)
+      ctx.fillRect(px + 3*s, py + 2*s, 2*s, 2*s)
       return
     }
     case 3:
       ctx.fillStyle = '#ff4400'
-      ctx.fillRect(px + 3, py,     2, 2)
-      ctx.fillRect(px + 2, py + 2, 4, 2)
-      ctx.fillRect(px + 1, py + 4, 6, 4)
+      ctx.fillRect(px + 3*s, py,       2*s, 2*s)
+      ctx.fillRect(px + 2*s, py + 2*s, 4*s, 2*s)
+      ctx.fillRect(px + 1*s, py + 4*s, 6*s, 4*s)
       return
     case 4: {
       const eb = (Math.sin(t * 0.12 + px) + 1) * 0.5
       ctx.fillStyle = '#ff55aa'
-      ctx.fillRect(px + 1, py + 2, 6, 5)
-      ctx.fillRect(px + 2, py + 1, 4, 1)
+      ctx.fillRect(px + 1*s, py + 2*s, 6*s, 5*s)
+      ctx.fillRect(px + 2*s, py + 1*s, 4*s, 1*s)
       ctx.fillStyle = `rgba(255,34,0,${0.7 + eb * 0.3})`
-      ctx.fillRect(px + 2, py + 3, 1, 1)
-      ctx.fillRect(px + 5, py + 3, 1, 1)
+      ctx.fillRect(px + 2*s, py + 3*s, 1*s, 1*s)
+      ctx.fillRect(px + 5*s, py + 3*s, 1*s, 1*s)
       return
     }
   }
@@ -86,17 +97,30 @@ function drawTile(ctx: CanvasRenderingContext2D, tile: number, px: number, py: n
 function drawCaptain(
   ctx: CanvasRenderingContext2D,
   sheet: HTMLCanvasElement,
-  animFrame: number,
+  t: number,
   lastMove: MoveType | null,
   px: number,
   py: number,
+  facing: number,   // 1 = right, -1 = left
 ) {
-  let frame = WALK_FRAMES[animFrame % WALK_FRAMES.length]
-  if (lastMove === Move.Punch) frame = PUNCH_FRAME
-  else if (lastMove === Move.Kick) frame = KICK_FRAME
-  else if (lastMove === Move.Jump) frame = JUMP_FRAME
-  ctx.drawImage(sheet, frame.sx, frame.sy, frame.sw, frame.sh,
-    px - TILE / 2, py - SPR_H + TILE, SPR_W, SPR_H)
+  let frame: typeof PUNCH_FRAME
+  if      (lastMove === Move.Punch) frame = PUNCH_FRAME
+  else if (lastMove === Move.Kick)  frame = KICK_FRAME
+  else if (lastMove === Move.Jump)  frame = JUMP_FRAME
+  else frame = WALK_FRAMES[Math.floor(t / 6) % WALK_FRAMES.length]
+
+  const dx = px - TILE / 2
+  const dy = py - SPR_H + TILE
+  ctx.save()
+  if (facing === -1) {
+    // Mirror horizontally: translate to right edge then scale -1
+    ctx.translate(dx + SPR_W, 0)
+    ctx.scale(-1, 1)
+    ctx.drawImage(sheet, frame.sx, frame.sy, frame.sw, frame.sh, 0, dy, SPR_W, SPR_H)
+  } else {
+    ctx.drawImage(sheet, frame.sx, frame.sy, frame.sw, frame.sh, dx, dy, SPR_W, SPR_H)
+  }
+  ctx.restore()
 }
 
 function drawEnemy(
@@ -105,14 +129,25 @@ function drawEnemy(
   t: number,
   px: number,
   py: number,
-  row: number = 0,  // 0 = walk, 1 = attack
+  row: number = 0,    // 0 = walk, 1 = attack, 2 = idle
+  facing: number = 1, // 1 = right, -1 = left
 ) {
   const cw  = sheet.width  / ENEMY_COLS
   const ch  = sheet.height / ENEMY_ROWS
   const col = Math.floor(t / 8) % ENEMY_COLS   // advance frame every 8 canvas ticks
   const sx  = col * cw
   const sy  = row * ch
-  ctx.drawImage(sheet, sx, sy, cw, ch, px - TILE / 2, py - SPR_H + TILE, SPR_W, SPR_H)
+  const dx  = px - TILE / 2
+  const dy  = py - SPR_H + TILE
+  ctx.save()
+  if (facing === -1) {
+    ctx.translate(dx + SPR_W, 0)
+    ctx.scale(-1, 1)
+    ctx.drawImage(sheet, sx, sy, cw, ch, 0, dy, SPR_W, SPR_H)
+  } else {
+    ctx.drawImage(sheet, sx, sy, cw, ch, dx, dy, SPR_W, SPR_H)
+  }
+  ctx.restore()
 }
 
 // ── Keyboard → Move mapping ────────────────────────────────────────────────────
@@ -178,7 +213,9 @@ export function GameScreen({ runId, onBack }: Props) {
   })
 
   // ── Canvas refs ───────────────────────────────────────────────────────────────
-  const canvasRef   = useRef<HTMLCanvasElement>(null)
+  const canvasRef   = useRef<HTMLCanvasElement>(null)   // Canvas 2D — hidden, source texture
+  const glCanvasRef = useRef<HTMLCanvasElement>(null)   // WebGL — visible display
+  const glStateRef  = useRef<RetroGL | null>(null)
   const rafRef      = useRef(0)
   const frameRef    = useRef(0)
   const localRef    = useRef(localState)
@@ -187,6 +224,31 @@ export function GameScreen({ runId, onBack }: Props) {
   const enemySheetRef  = useRef<HTMLCanvasElement | null>(null)
   const bgRef          = useRef<HTMLImageElement | null>(null)
   const lastMoveRef    = useRef<MoveType | null>(null)
+
+  // ── Post-processing state ──────────────────────────────────────────────────
+  const hitFlashRef    = useRef(0)                         // white flash on damage
+  const defFlashRef    = useRef(0)                         // cyan flash on enemy kill
+  const glitchRef      = useRef(0)                         // glitch burst on game over
+  const shakeRef       = useRef({ x: 0, y: 0, ttl: 0 })  // screen shake state
+  const prevHealthRef  = useRef(3)
+  const prevEnemiesRef = useRef(0)
+  const prevScoreRef   = useRef(0)
+  const cameraRef      = useRef({ x: 0, y: 0 })           // smooth-follow camera (tile units)
+  const facingRef      = useRef(1)                         // captain facing: 1=right, -1=left
+
+  // Init WebGL post-processing
+  useEffect(() => {
+    const canvas = glCanvasRef.current
+    if (!canvas) return
+    glStateRef.current = initRetroGL(canvas)
+    return () => { glStateRef.current?.dispose(); glStateRef.current = null }
+  }, [])
+
+  // Game music — start intense variant when screen mounts, stop on unmount
+  useEffect(() => {
+    startMusic('game')
+    return () => stopMusic()
+  }, [])
 
   // Load sprite sheets with background removal + background image
   useEffect(() => {
@@ -214,6 +276,11 @@ export function GameScreen({ runId, onBack }: Props) {
       if (move === undefined) return
       e.preventDefault()
       lastMoveRef.current = move
+      if (move === Move.Left)  facingRef.current = -1
+      if (move === Move.Right) facingRef.current =  1
+      if (move === Move.Jump)  playJump()
+      if (move === Move.Punch) playPunch()
+      if (move === Move.Kick)  playKick()
       applyMove(move)   // instant local physics
       enqueue(move)     // queued for chain
     }
@@ -224,57 +291,153 @@ export function GameScreen({ runId, onBack }: Props) {
 
   // ── Canvas render loop (reads localState, not chain) ──────────────────────────
   const draw = useCallback(() => {
-    const canvas = canvasRef.current
-    const ctx    = canvas?.getContext('2d')
-    if (!ctx || !canvas) return
+    const canvas   = canvasRef.current
+    const ctx      = canvas?.getContext('2d')
+    const glCanvas = glCanvasRef.current
+    const retro    = glStateRef.current
+    if (!ctx || !canvas) { rafRef.current = requestAnimationFrame(draw); return }
 
     frameRef.current++
     const t  = frameRef.current
     const ls = localRef.current
 
+    // ── Detect game events ────────────────────────────────────────────────────
+    const hp    = ls.player.health
+    const score = ls.player.score
+    const defs  = ls.enemiesDefeated
+
+    if (hp < prevHealthRef.current) {
+      // Damage taken — white flash + screen shake + hurt SFX
+      hitFlashRef.current = 0.92
+      shakeRef.current    = {
+        x:   (Math.random() - 0.5) * 8,
+        y:   (Math.random() - 0.5) * 5,
+        ttl: 12,
+      }
+      playHurt()
+    }
+    prevHealthRef.current = hp
+
+    if (defs > prevEnemiesRef.current) {
+      // Enemy killed — cyan flash + SFX
+      defFlashRef.current = 0.85
+      playEnemyDefeat()
+    }
+    prevEnemiesRef.current = defs
+
+    // Gem collected = score increased but enemy count unchanged
+    if (score > prevScoreRef.current && defs === prevEnemiesRef.current) {
+      playGemCollect()
+    }
+    prevScoreRef.current = score
+
+    if (!ls.active && glitchRef.current === 0) {
+      // Run ended — glitch burst + music stop + win/gameover jingle
+      glitchRef.current = 1.0
+      stopMusic()
+      if (ls.won) playWin()
+      else        playGameOver()
+    }
+
+    // ── Screen shake translate ────────────────────────────────────────────────
+    const shake    = shakeRef.current
+    const shaking  = shake.ttl > 0
+    if (shaking) {
+      ctx.save()
+      ctx.translate(shake.x, shake.y)
+      shake.ttl--
+      if (shake.ttl > 0) {
+        const decay = shake.ttl / 12
+        shake.x = (Math.random() - 0.5) * 8 * decay
+        shake.y = (Math.random() - 0.5) * 5 * decay
+      } else {
+        shake.x = 0; shake.y = 0
+      }
+    }
+
     ctx.imageSmoothingEnabled = false
+
+    // ── Smooth-follow camera ──────────────────────────────────────────────────
+    const posX = Math.min(Math.max(ls.player.posX, 0), COLS - 1)
+    const posY = Math.min(Math.max(ls.player.posY, 0), ROWS - 1)
+    const cam  = cameraRef.current
+    const targetCX = Math.max(0, Math.min(COLS - VIEWPORT_W, posX - VIEWPORT_W / 2))
+    const targetCY = Math.max(0, Math.min(ROWS - VIEWPORT_H, posY - VIEWPORT_H / 2))
+    cam.x += (targetCX - cam.x) * 0.15
+    cam.y += (targetCY - cam.y) * 0.15
+    const ox = -cam.x * TILE   // pixel offset X
+    const oy = -cam.y * TILE   // pixel offset Y
 
     // Draw background image, or solid fallback
     const bg = bgRef.current
     if (bg) {
-      ctx.drawImage(bg, 0, 0, COLS * TILE, ROWS * TILE)
+      // Tile the background across the full level, then clip to viewport
+      ctx.drawImage(bg,
+        cam.x / COLS * bg.naturalWidth,  cam.y / ROWS * bg.naturalHeight,
+        (VIEWPORT_W / COLS) * bg.naturalWidth, (VIEWPORT_H / ROWS) * bg.naturalHeight,
+        0, 0, CANVAS_W, CANVAS_H)
     } else {
       ctx.fillStyle = '#06060f'
-      ctx.fillRect(0, 0, COLS * TILE, ROWS * TILE)
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
     }
 
-    // Draw tiles — tile map no longer contains enemy tiles (they are dynamic)
-    for (let y = 0; y < ROWS; y++)
-      for (let x = 0; x < COLS; x++) {
+    // Draw only tiles in the viewport (+1 tile buffer each side to hide seams)
+    const x0 = Math.floor(cam.x)
+    const y0 = Math.floor(cam.y)
+    for (let y = y0; y <= y0 + VIEWPORT_H + 1; y++) {
+      for (let x = x0; x <= x0 + VIEWPORT_W + 1; x++) {
+        if (x < 0 || x >= COLS || y < 0 || y >= ROWS) continue
         const idx  = y * LEVEL_WIDTH + x
         const tile = ls.clearedTiles.has(idx) ? 0 : LEVEL_MAP[idx]
-        drawTile(ctx, tile, x * TILE, y * TILE, t)
+        drawTile(ctx, tile, x * TILE + ox, y * TILE + oy, t)
       }
+    }
 
-    // Draw captain from local physics position
-    const posX = Math.min(Math.max(ls.player.posX, 0), COLS - 1)
-    const posY = Math.min(Math.max(ls.player.posY, 0), ROWS - 1)
+    // Draw captain
     const sheet = spriteRef.current
     if (sheet) {
       ctx.shadowColor = '#4499ff'
-      ctx.shadowBlur  = 6
-      drawCaptain(ctx, sheet, ls.player.animFrame, lastMoveRef.current, posX * TILE, posY * TILE)
+      ctx.shadowBlur  = 8
+      drawCaptain(ctx, sheet, t, lastMoveRef.current,
+        posX * TILE + ox, posY * TILE + oy, facingRef.current)
       ctx.shadowBlur  = 0
     }
 
-    // Draw dynamic enemies at their computed patrol positions
+    // Draw dynamic enemies — cull those outside viewport
     const enemySheet = enemySheetRef.current
     if (enemySheet) {
       const enemies = getEnemyPositions(ls.enemiesDefeated, ls.tick)
       for (const e of enemies) {
         if (!e.alive) continue
+        const esx = e.posX * TILE + ox
+        const esy = e.posY * TILE + oy
+        if (esx < -TILE * 2 || esx > CANVAS_W + TILE) continue
+        if (esy < -TILE * 2 || esy > CANVAS_H + TILE) continue
         const adjacent = Math.abs(e.posX - posX) <= 1 && e.posY === posY
         const row = adjacent ? 1 : 0    // row 1 = bat-attack, row 0 = walk
         ctx.shadowColor = '#ff44aa'
-        ctx.shadowBlur  = 5
-        drawEnemy(ctx, enemySheet, t, e.posX * TILE, e.posY * TILE, row)
+        ctx.shadowBlur  = 6
+        drawEnemy(ctx, enemySheet, t, esx, esy, row, e.facing)
         ctx.shadowBlur  = 0
       }
+    }
+
+    // Restore transform after shake
+    if (shaking) ctx.restore()
+
+    // ── WebGL post-processing pass ────────────────────────────────────────────
+    if (retro && glCanvas) {
+      hitFlashRef.current = Math.max(0, hitFlashRef.current - 0.10)
+      defFlashRef.current = Math.max(0, defFlashRef.current - 0.09)
+      glitchRef.current   = Math.max(0, glitchRef.current   - 0.006)
+
+      retro.render(canvas, {
+        ...DEFAULT_RETRO,
+        time:     performance.now() / 1000,
+        hitFlash: hitFlashRef.current,
+        defFlash: defFlashRef.current,
+        glitch:   glitchRef.current,
+      })
     }
 
     rafRef.current = requestAnimationFrame(draw)
@@ -329,10 +492,18 @@ export function GameScreen({ runId, onBack }: Props) {
 
       {/* ── Canvas ── */}
       <div className="game-canvas-wrap">
+        {/* Canvas 2D — hidden, used as source texture for WebGL */}
         <canvas
           ref={canvasRef}
-          width={COLS * TILE}
-          height={ROWS * TILE}
+          width={CANVAS_W}
+          height={CANVAS_H}
+          style={{ display: 'none' }}
+        />
+        {/* WebGL display canvas — retro post-processing applied here */}
+        <canvas
+          ref={glCanvasRef}
+          width={CANVAS_W}
+          height={CANVAS_H}
           className="game-canvas"
         />
       </div>
@@ -383,6 +554,11 @@ export function GameScreen({ runId, onBack }: Props) {
               onClick={() => {
                 if (!canMove) return
                 lastMoveRef.current = m
+                if (m === Move.Left)  facingRef.current = -1
+                if (m === Move.Right) facingRef.current =  1
+                if (m === Move.Jump)  playJump()
+                if (m === Move.Punch) playPunch()
+                if (m === Move.Kick)  playKick()
                 applyMove(m)
                 enqueue(m)
               }}

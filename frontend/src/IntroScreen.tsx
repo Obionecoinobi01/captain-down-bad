@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAccount, useConnect, useDisconnect } from 'wagmi'
 import { TitleScreen } from './TitleScreen'
 import { useUsdcBalance } from './useGameState'
 import { useStartRun } from './useStartRun'
+import { startIntroTrack, stopIntroTrack, playUIClick } from './sound'
 
 interface Props {
   onStart: (runId: bigint) => void
@@ -25,11 +26,18 @@ export function IntroScreen({ onStart }: Props) {
   const { formatted: usdcBalance } = useUsdcBalance(address)
   const { startRun, status, runId, error, reset } = useStartRun(address)
   const [bet, setBet] = useState('1.00')
-  const [attracted, setAttracted] = useState(true)
+  const [showVideo, setShowVideo]   = useState(true)   // intro cinematic phase
+  const [attracted, setAttracted]   = useState(true)   // attract / press-start phase
+  const videoRef = useRef<HTMLVideoElement>(null)
 
-  // Once run is confirmed, pass runId up to App
+  function skipVideo() {
+    setShowVideo(false)
+  }
+
+  // Once run is confirmed, fade out intro track then hand off
   useEffect(() => {
     if (status === 'done' && runId !== undefined) {
+      stopIntroTrack()
       const t = setTimeout(() => onStart(runId), 900)
       return () => clearTimeout(t)
     }
@@ -50,18 +58,34 @@ export function IntroScreen({ onStart }: Props) {
   return (
     <div
       className="intro-screen"
-      onClick={attracted ? () => setAttracted(false) : undefined}
+      onClick={attracted && !showVideo ? () => { setAttracted(false); startIntroTrack() } : undefined}
     >
+      {/* ── Cinematic intro video (plays once, muted, full-screen) ── */}
+      {showVideo && (
+        <div className="intro-video-wrap" onClick={skipVideo}>
+          <video
+            ref={videoRef}
+            className="intro-video"
+            src="/video/intro.mp4"
+            autoPlay
+            muted
+            playsInline
+            onEnded={skipVideo}
+          />
+          <div className="intro-skip-hint">TAP TO SKIP ▶</div>
+        </div>
+      )}
+
       {/* ── Title art ── */}
       <div className="intro-title-area">
-        <div className="intro-label-top">AND THE HUNT FOR THE</div>
-
         <h1 className="intro-main-title">
           <span className="intro-captain">CAPTAIN</span>
           <div className="intro-downbad-wrap">
             <span className="intro-downbad">DOWN BAD</span>
           </div>
         </h1>
+
+        <div className="intro-label-top">AND THE HUNT FOR THE</div>
 
         <div className="intro-magical-d">
           MAGICAL&nbsp;<span className="intro-d-gem">D</span>
@@ -88,7 +112,7 @@ export function IntroScreen({ onStart }: Props) {
                 <button
                   key={c.id}
                   className="intro-connect-btn"
-                  onClick={e => { e.stopPropagation(); connect({ connector: c }) }}
+                  onClick={e => { e.stopPropagation(); playUIClick(); connect({ connector: c }) }}
                 >
                   {c.name.toUpperCase()}
                 </button>
@@ -129,7 +153,7 @@ export function IntroScreen({ onStart }: Props) {
                   status === 'error' ? 'error' : '',
                 ].join(' ').trim()}
                 disabled={busy}
-                onClick={e => { e.stopPropagation(); handleStart() }}
+                onClick={e => { e.stopPropagation(); playUIClick(); handleStart() }}
               >
                 {actionLabel}
               </button>

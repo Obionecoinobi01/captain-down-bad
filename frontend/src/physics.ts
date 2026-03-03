@@ -86,9 +86,10 @@ export function enemyPosX(idx: number, tick: number): number {
 }
 
 export interface EnemyPosition {
-  posX:  number
-  posY:  number
-  alive: boolean
+  posX:   number
+  posY:   number
+  alive:  boolean
+  facing: number   // 1 = facing right, -1 = facing left
 }
 
 /**
@@ -99,11 +100,18 @@ export interface EnemyPosition {
 export function getEnemyPositions(enemiesDefeated: number, tick: number): EnemyPosition[] {
   const result: EnemyPosition[] = []
   for (let i = 0; i < ENEMY_COUNT; i++) {
-    const alive = ((enemiesDefeated >> i) & 1) === 0
+    const alive  = ((enemiesDefeated >> i) & 1) === 0
+    const pMin   = ENEMY_PATROL_MIN[i]
+    const pMax   = ENEMY_PATROL_MAX[i]
+    const spd    = ENEMY_PATROL_SPEED[i]
+    const range  = pMax - pMin
+    const phase  = Math.floor(tick / spd) % (range * 2)
+    const facing = phase <= range ? 1 : -1   // increasing X = face right
     result.push({
       posX:  alive ? enemyPosX(i, tick) : -1,
       posY:  ENEMY_Y[i],
       alive,
+      facing,
     })
   }
   return result
