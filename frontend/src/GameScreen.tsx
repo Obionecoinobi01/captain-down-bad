@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef } from 'react'
-import { useAccount } from 'wagmi'
-import { useRun } from './useGameState'
-import { useCommitReveal, Move, MOVE_LABELS, TX_STATUS_LABEL } from './useCommitReveal'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useRun, useGemEventFetcher } from './useGameState'
+import { useSessionKey } from './useSessionKey'
+import { useSubmitMove, MOVE_LABELS } from './useSubmitMove'
+import type { Move } from './useSubmitMove'
 
 interface Props {
   runId: bigint
@@ -16,16 +17,15 @@ const ROWS = 16
 // ── Sprite palette ─────────────────────────────────────────────────────────────
 const K  = '#111111'
 const _s = null
-const CB = '#4499ff'  // cape blue
-const CS = '#ffcc99'  // skin
-const CG = '#ffdd00'  // gold D emblem
-const CL = '#1155cc'  // dark legs
+const CB = '#4499ff'
+const CS = '#ffcc99'
+const CG = '#ffdd00'
+const CL = '#1155cc'
 
-type Px = string | null
+type Px    = string | null
 type Frame = Px[][]
 
 const CAPTAIN_FRAMES: Frame[] = [
-  // frame 0 — left foot
   [
     [_s,_s, K, K, K, K,_s,_s],
     [_s, K,CS,CS,CS, K,_s,_s],
@@ -36,7 +36,6 @@ const CAPTAIN_FRAMES: Frame[] = [
     [_s, K,CL,_s,CL, K,_s,_s],
     [_s, K, K,_s, K, K,_s,_s],
   ],
-  // frame 1 — right foot
   [
     [_s,_s, K, K, K, K,_s,_s],
     [_s, K,CS,CS,CS, K,_s,_s],
@@ -49,40 +48,25 @@ const CAPTAIN_FRAMES: Frame[] = [
   ],
 ]
 
-// ── Level layout ───────────────────────────────────────────────────────────────
-// Hardcoded to match expected on-chain getTile layout (0=air,1=wall,2=gem,3=spike)
-function buildLevel(): number[][] {
+// ── Level — decoded from contract LEVEL_MAP_BYTES ─────────────────────────────
+//  0 = air   1 = wall/platform   2 = gem   3 = spike   4 = enemy
+const LEVEL: number[][] = (() => {
   const g = Array.from({ length: ROWS }, () => Array<number>(COLS).fill(0))
-
-  // Floor
-  for (let x = 0; x < COLS; x++) g[15][x] = 1
-
-  // Platforms
-  for (let x = 3;  x <= 9;  x++) g[11][x] = 1
-  for (let x = 14; x <= 20; x++) g[9][x]  = 1
-  for (let x = 24; x <= 30; x++) g[11][x] = 1
-  for (let x = 8;  x <= 14; x++) g[7][x]  = 1
-  for (let x = 18; x <= 25; x++) g[6][x]  = 1
-  for (let x = 0;  x <= 5;  x++) g[6][x]  = 1
-
-  // Gems
-  for (const [y, x] of [[10,6],[10,8],[8,17],[8,19],[10,27],[6,11],[6,13],[5,21],[5,23],[5,2],[5,4]])
-    g[y][x] = 2
-
-  // Spikes
-  for (const [y, x] of [[14,5],[14,6],[14,18],[14,25],[14,26]])
-    g[y][x] = 3
-
+  for (let x = 8;  x <= 14; x++) g[9][x]  = 1  // left platform
+  for (let x = 16; x <= 22; x++) g[11][x] = 1  // right platform
+  for (let x = 0;  x < COLS; x++) g[15][x] = 1  // floor
+  g[8][10] = 2; g[8][12] = 2                    // gems
+  g[10][18] = 2; g[10][20] = 2
+  g[8][8] = 4;  g[14][16] = 4                   // enemies
+  g[14][5] = 3; g[14][25] = 3                   // spikes
   return g
-}
-
-const LEVEL = buildLevel()
+})()
 
 // ── Drawing helpers ────────────────────────────────────────────────────────────
 function drawTile(ctx: CanvasRenderingContext2D, tile: number, px: number, py: number, t: number) {
   switch (tile) {
     case 0: return
-    case 1:  // wall / platform
+    case 1:
       ctx.fillStyle = '#1a2a4e'
       ctx.fillRect(px, py, TILE, TILE)
       ctx.fillStyle = '#2a3d72'
@@ -91,7 +75,7 @@ function drawTile(ctx: CanvasRenderingContext2D, tile: number, px: number, py: n
       ctx.fillStyle = '#0d1a30'
       ctx.fillRect(px, py + TILE - 1, TILE, 1)
       return
-    case 2: {  // Magical D gem — pulses
+    case 2: {
       const b = (Math.sin(t * 0.08 + px * 0.4) + 1) * 0.5
       const a = (0.65 + b * 0.35).toFixed(2)
       ctx.fillStyle = `rgba(0,255,204,${a})`
@@ -102,54 +86,113 @@ function drawTile(ctx: CanvasRenderingContext2D, tile: number, px: number, py: n
       ctx.fillRect(px + 3, py + 2, 2, 2)
       return
     }
-    case 3:  // spike
+    case 3:
       ctx.fillStyle = '#ff4400'
       ctx.fillRect(px + 3, py,     2, 2)
       ctx.fillRect(px + 2, py + 2, 4, 2)
       ctx.fillRect(px + 1, py + 4, 6, 4)
       return
-    case 4:  // enemy marker
+    case 4: {
+      const eb = (Math.sin(t * 0.12 + px) + 1) * 0.5
       ctx.fillStyle = '#ff55aa'
-      ctx.fillRect(px + 1, py + 1, TILE - 2, TILE - 2)
+      ctx.fillRect(px + 1, py + 2, 6, 5)
+      ctx.fillRect(px + 2, py + 1, 4, 1)
+      ctx.fillStyle = `rgba(255,34,0,${0.7 + eb * 0.3})`
+      ctx.fillRect(px + 2, py + 3, 1, 1)
+      ctx.fillRect(px + 5, py + 3, 1, 1)
       return
+    }
   }
 }
 
 function drawSprite(ctx: CanvasRenderingContext2D, frame: Frame, px: number, py: number) {
-  for (let row = 0; row < 8; row++) {
+  for (let row = 0; row < 8; row++)
     for (let col = 0; col < 8; col++) {
       const c = frame[row][col]
       if (!c) continue
       ctx.fillStyle = c
       ctx.fillRect(px + col, py + row, 1, 1)
     }
-  }
+}
+
+// ── Keyboard → Move mapping ────────────────────────────────────────────────────
+const KEY_MOVE: Record<string, Move> = {
+  ArrowLeft:  1, a: 1, A: 1,
+  ArrowRight: 2, d: 2, D: 2,
+  ArrowUp:    3, w: 3, W: 3, ' ': 3,
+  ArrowDown:  0,
+  z: 4, Z: 4,
+  x: 5, X: 5,
 }
 
 // ── Component ──────────────────────────────────────────────────────────────────
 export function GameScreen({ runId, onBack }: Props) {
-  const { address } = useAccount()
-  const { run, state, refetch } = useRun(runId)
-  const { submitMove, txStatus, error, reset } = useCommitReveal(runId, address)
+  const { run, state, refetch }  = useRun(runId)
+  const fetchClearedGems         = useGemEventFetcher(runId)
+  const [clearedGems, setClearedGems] = useState<Set<string>>(new Set())
+
+  const {
+    status: skStatus,
+    error:  skError,
+    sessionPrivateKey,
+    generateAndAuthorize,
+    reset: resetSK,
+  } = useSessionKey(runId)
+
+  const {
+    submitMove,
+    moveStatus,
+    error: moveError,
+    resetMove,
+  } = useSubmitMove(runId, sessionPrivateKey)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rafRef    = useRef(0)
-  const frameRef  = useRef(0)   // animation tick counter
+  const frameRef  = useRef(0)
   const stateRef  = useRef(state)
   stateRef.current = state
+  const clearedRef = useRef(clearedGems)
+  clearedRef.current = clearedGems
 
-  // Refetch and reset after each reveal
+  // Load historical gem events on mount
   useEffect(() => {
-    if (txStatus === 'done') {
-      refetch().then(() => reset())
+    fetchClearedGems().then(setClearedGems)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Refetch run state + gem events after each move confirms
+  useEffect(() => {
+    if (moveStatus === 'done') {
+      Promise.all([refetch(), fetchClearedGems()]).then(([, gems]) => {
+        setClearedGems(gems)
+        resetMove()
+      })
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [txStatus])
+  }, [moveStatus])
+
+  // Keyboard controls — only when session key is ready and no move in-flight
+  const canMove = skStatus === 'ready' && moveStatus === 'idle'
+  const canMoveRef = useRef(canMove)
+  canMoveRef.current = canMove
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!canMoveRef.current) return
+      const move = KEY_MOVE[e.key]
+      if (move === undefined) return
+      e.preventDefault()
+      submitMove(move)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submitMove])
 
   // Canvas render loop
   const draw = useCallback(() => {
     const canvas = canvasRef.current
-    const ctx = canvas?.getContext('2d')
+    const ctx    = canvas?.getContext('2d')
     if (!ctx || !canvas) return
 
     frameRef.current++
@@ -160,18 +203,17 @@ export function GameScreen({ runId, onBack }: Props) {
     ctx.fillStyle = '#06060f'
     ctx.fillRect(0, 0, COLS * TILE, ROWS * TILE)
 
-    // Tiles
     for (let y = 0; y < ROWS; y++)
-      for (let x = 0; x < COLS; x++)
-        drawTile(ctx, LEVEL[y][x], x * TILE, y * TILE, t)
+      for (let x = 0; x < COLS; x++) {
+        const tile = clearedRef.current.has(`${x},${y}`) ? 0 : LEVEL[y][x]
+        drawTile(ctx, tile, x * TILE, y * TILE, t)
+      }
 
-    // Player
-    const posX = Math.min(Math.max(st?.posX ?? 1, 0), COLS - 1)
-    const posY = Math.min(Math.max(st?.posY ?? 13, 0), ROWS - 1)
-    const animF = st?.animFrame ?? 0
+    const posX = Math.min(Math.max(st?.posX ?? 2, 0), COLS - 1)
+    const posY = Math.min(Math.max(st?.posY ?? 14, 0), ROWS - 1)
     ctx.shadowColor = '#4499ff'
     ctx.shadowBlur  = 4
-    drawSprite(ctx, CAPTAIN_FRAMES[animF % 2], posX * TILE, posY * TILE)
+    drawSprite(ctx, CAPTAIN_FRAMES[(st?.animFrame ?? 0) % 2], posX * TILE, posY * TILE)
     ctx.shadowBlur = 0
 
     rafRef.current = requestAnimationFrame(draw)
@@ -182,25 +224,43 @@ export function GameScreen({ runId, onBack }: Props) {
     return () => cancelAnimationFrame(rafRef.current)
   }, [draw])
 
-  const busy   = txStatus !== 'idle' && txStatus !== 'done' && txStatus !== 'error'
-  const active = run?.active ?? true   // assume active until data loads
-  const hp     = state?.health ?? '?'
-  const score  = state?.score?.toString().padStart(6, '0') ?? '000000'
-  const tick   = run?.tick?.toString() ?? '0'
-
-  const statusMsg = txStatus === 'error' && error
-    ? error.slice(0, 100)
-    : TX_STATUS_LABEL[txStatus]
-
+  // ── HUD values ──────────────────────────────────────────────────────────────
+  const hp       = state?.health ?? 3
+  const hearts   = '♥'.repeat(hp) + '♡'.repeat(Math.max(0, 3 - hp))
+  const score    = (state?.score ?? 0n).toString().padStart(6, '0')
+  const tick     = run?.tick?.toString() ?? '0'
   const runEnded = run !== null && run?.active === false
+
+  // Status line priority: move tx > session key
+  const statusMsg = (() => {
+    if (moveStatus === 'error' && moveError)    return moveError.slice(0, 100)
+    if (moveStatus === 'sending')               return 'SENDING MOVE...'
+    if (moveStatus === 'confirming')            return 'CONFIRMING TICK...'
+    if (moveStatus === 'done')                  return 'TICK COMPLETE!'
+    if (skStatus === 'error' && skError)        return skError.slice(0, 100)
+    if (skStatus === 'authorizing')             return 'TX 1/2: SIGNING SESSION KEY...'
+    if (skStatus === 'confirming')              return 'TX 1/2: CONFIRMING ON-CHAIN...'
+    if (skStatus === 'funding')                 return 'TX 2/2: SEND GAS TO SESSION KEY...'
+    if (skStatus === 'funding_confirm')         return 'TX 2/2: CONFIRMING FUNDING...'
+    return ''
+  })()
+
+  const skBusy = skStatus === 'authorizing' || skStatus === 'confirming'
+              || skStatus === 'funding'     || skStatus === 'funding_confirm'
+  const moveBusy = moveStatus === 'sending' || moveStatus === 'confirming'
+
+  function handleSessionKeyBtn() {
+    if (skStatus === 'error') { resetSK(); return }
+    generateAndAuthorize()
+  }
 
   return (
     <div className="game-screen">
 
       {/* ── HUD ── */}
       <div className="game-hud">
-        <span className="hud-run">RUN #{runId.toString()}</span>
-        <span className="hud-hp">HP <em>{hp}</em></span>
+        <span className="hud-run">RUN <em>#{runId.toString()}</em></span>
+        <span className="hud-hp"><em>{hearts}</em></span>
         <span className="hud-score">SCORE <em>{score}</em></span>
         <span className="hud-tick">TICK <em>{tick}</em></span>
       </div>
@@ -215,29 +275,50 @@ export function GameScreen({ runId, onBack }: Props) {
         />
       </div>
 
-      {/* ── Status ── */}
-      <div className={`game-status ${txStatus === 'error' ? 'err' : ''}`}>
+      {/* ── Status line ── */}
+      <div className={`game-status ${moveStatus === 'error' || skStatus === 'error' ? 'err' : ''}`}>
         {statusMsg || '\u00a0'}
       </div>
 
-      {/* ── Run ended overlay ── */}
-      {runEnded && (
-        <div className="game-over">
-          <div className="game-over-title">
-            {(state?.health ?? 1) > 0 ? 'YOU WIN!' : 'GAME OVER'}
+      {/* ── Session key setup (shown until authorized) ── */}
+      {!runEnded && skStatus !== 'ready' && (
+        <div className="game-session-setup">
+          <div className="session-hint">
+            Sign once to set up a session key — then play without MetaMask popups.
           </div>
-          <div className="game-over-score">FINAL SCORE: {score}</div>
+          <button
+            className={`session-key-btn${skBusy ? ' busy' : ''}${skStatus === 'error' ? ' error' : ''}`}
+            disabled={skBusy}
+            onClick={handleSessionKeyBtn}
+          >
+            {skBusy
+              ? (skStatus === 'funding' || skStatus === 'funding_confirm'
+                  ? 'FUNDING KEY...'
+                  : 'AUTHORIZING...')
+              : skStatus === 'error'
+                ? '✗ RETRY'
+                : '⚡ AUTHORIZE SESSION KEY'}
+          </button>
         </div>
       )}
 
-      {/* ── Move pad ── */}
-      {!runEnded && (
+      {/* ── Game over overlay ── */}
+      {runEnded && (
+        <div className="game-over">
+          <div className="game-over-title">{hp > 0 ? 'YOU WIN!' : 'GAME OVER'}</div>
+          <div className="game-over-score">FINAL SCORE: {score}</div>
+          <button className="btn-back" onClick={onBack}>← play again</button>
+        </div>
+      )}
+
+      {/* ── Move pad (only when session key ready) ── */}
+      {!runEnded && skStatus === 'ready' && (
         <div className="game-movepad">
           {([1, 3, 2, 0, 4, 5] as Move[]).map(m => (
             <button
               key={m}
               className={`move-btn move-${m}`}
-              disabled={busy || !active}
+              disabled={moveBusy}
               onClick={() => submitMove(m)}
             >
               {MOVE_LABELS[m]}

@@ -564,3 +564,52 @@ body::after {
   flex-shrink: 0;
   padding-bottom: 0.15rem;
 }
+
+/* ── Session key setup ────────────────────────────────────────────────── */
+.game-session-setup {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+.session-hint {
+  font-size: 0.62rem;
+  color: #446;
+  letter-spacing: 0.04em;
+  max-width: 300px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.session-key-btn {
+  font-family: 'Press Start 2P', monospace;
+  font-size: clamp(0.42rem, 1.2vw, 0.56rem);
+  letter-spacing: 0.14em;
+  padding: 0.55em 1.3em;
+  border-radius: 2px;
+  cursor: pointer;
+  border: 1px solid #ffcc0066;
+  background: transparent;
+  color: #ffcc00;
+  text-shadow: 0 0 8px #ffcc0088;
+  transition: all 0.15s;
+  animation: intro-blink 1s step-end infinite;
+}
+.session-key-btn:hover:not(:disabled) {
+  background: #ffcc0011;
+  border-color: #ffcc00aa;
+  animation: none;
+}
+.session-key-btn.busy {
+  color: #665500;
+  border-color: #44330033;
+  cursor: not-allowed;
+  animation: none;
+}
+.session-key-btn.error {
+  color: #ff4466;
+  border-color: #ff446633;
+  animation: none;
+}

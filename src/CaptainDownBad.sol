@@ -12,7 +12,8 @@ import {SafeERC20}       from "@openzeppelin/contracts/token/ERC20/utils/SafeERC
  * @notice Fully on-chain turn-based pixel platformer on Base.
  *         Captain Down Bad hunts glowing Magical D gems across neon pixel levels.
  *
- * @dev    Game loop: 60-second ticks, commit-reveal move scheme.
+ * @dev    Game loop: session-key based moves (one MetaMask sig to start, then
+ *         moves submitted silently by an ephemeral key held in the browser).
  *         All player state packed into one uint256 storage slot.
  *
  *         Packed uint256 layout (high-to-low):
@@ -37,10 +38,8 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     /// @dev USDC token — set at deploy time (mainnet: 0x833589…/ sepolia: 0x036CbD…)
     IERC20 public immutable USDC;
 
-    uint256 public constant TICK_DURATION      = 60;    // seconds per tick
     uint256 public constant HOUSE_FEE_BPS      = 100;   // 1 %
     uint256 public constant BPS_DENOM          = 10_000;
-    uint256 public constant REVEAL_WINDOW      = 2;     // ticks before commit expires
     uint256 public constant LEVEL_WIDTH        = 32;
     uint256 public constant LEVEL_HEIGHT       = 16;
     uint8   public constant INITIAL_HEALTH     = 3;
@@ -68,13 +67,6 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     //    y=14, x=15    enemy patrolling ground level
     //
     //  4 Magical D gems → LEVEL_0_GEM_COUNT = 4
-    //
-    // Row 8:  pos 16=enemy(04), 20=gem(02), 24=gem(02)
-    // Row 9:  pos 16-28=wall(01)
-    // Row 10: pos 36=gem(02), 40=gem(02)
-    // Row 11: pos 32-44=wall(01)
-    // Row 14: pos 10=spike(03), 30=enemy(04), 50=spike(03)
-    // Row 15: all wall(01)
     //
     bytes private constant LEVEL_MAP_BYTES = hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=0
         hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=1
@@ -134,8 +126,6 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
      * @param levelId        Which level is being played.
      * @param bet            USDC entry fee (6 decimals).
      * @param tick           Current game tick counter.
-     * @param revealDeadline Unix timestamp; reveal must arrive before this.
-     * @param commit         Pending move commitment hash (0 = none).
      * @param playerState    Packed uint256 (see layout above).
      * @param active         False once the run ends.
      * @param finalScore     Populated on run end.
@@ -145,8 +135,6 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
         uint256 levelId;
         uint256 bet;
         uint256 tick;
-        uint256 revealDeadline;
-        bytes32 commit;
         uint256 playerState;
         bool    active;
         uint256 finalScore;
@@ -159,6 +147,11 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     /// @notice All runs by ID.
     mapping(uint256 => Run) public runs;
     uint256 public nextRunId;
+
+    /// @notice Session keys: runId → authorized ephemeral address.
+    ///         The session key can submit moves on behalf of the player
+    ///         without requiring a MetaMask popup for every move.
+    mapping(uint256 => address) public sessionKeys;
 
     /// @notice Level tile data: levelId → LEVEL_WIDTH*LEVEL_HEIGHT bytes.
     mapping(uint256 => bytes) public levels;
@@ -174,8 +167,8 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     // -------------------------------------------------------------------------
 
     event RunStarted(uint256 indexed runId, address indexed player, uint256 bet, uint256 levelId);
-    event MoveCommitted(uint256 indexed runId, uint256 tick, bytes32 commitHash);
-    event MoveRevealed(uint256 indexed runId, uint256 tick, Move move);
+    event SessionKeySet(uint256 indexed runId, address indexed key);
+    event MovePlayed(uint256 indexed runId, uint256 tick, Move move);
     event TickAdvanced(uint256 indexed runId, uint256 tick, uint256 playerState);
     event GemCollected(uint256 indexed runId, uint8 posX, uint8 posY, uint256 newScore);
     event RunEnded(uint256 indexed runId, address indexed player, uint256 payout, uint256 finalScore, bool won);
@@ -211,77 +204,52 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
 
         uint256 runId = nextRunId++;
         runs[runId] = Run({
-            player:         msg.sender,
-            levelId:        levelId,
-            bet:            bet,
-            tick:           0,
-            revealDeadline: 0,
-            commit:         bytes32(0),
-            playerState:    _buildInitialState(),
-            active:         true,
-            finalScore:     0
+            player:      msg.sender,
+            levelId:     levelId,
+            bet:         bet,
+            tick:        0,
+            playerState: _buildInitialState(),
+            active:      true,
+            finalScore:  0
         });
 
         emit RunStarted(runId, msg.sender, bet, levelId);
     }
 
     /**
-     * @notice Commit a move for the current tick.
-     *         commitHash = keccak256(abi.encodePacked(move, salt, msg.sender))
-     * @param runId      The run to commit for.
-     * @param commitHash Blinded commitment.
+     * @notice Authorize an ephemeral session key for a run.
+     *         The session key can then call submitMove without MetaMask prompts.
+     *         Only the run's player may set this. Can be updated any time while active.
+     * @param runId The run ID.
+     * @param key   The ephemeral address (generated in-browser, private key in localStorage).
      */
-    function commitMove(uint256 runId, bytes32 commitHash) external whenNotPaused {
+    function authorizeSessionKey(uint256 runId, address key) external {
         Run storage run = runs[runId];
         require(run.active,               "CDB: inactive");
         require(run.player == msg.sender, "CDB: not your run");
-        require(run.commit == bytes32(0), "CDB: already committed");
-
-        run.commit         = commitHash;
-        run.revealDeadline = block.timestamp + TICK_DURATION * REVEAL_WINDOW;
-
-        emit MoveCommitted(runId, run.tick, commitHash);
+        require(key != address(0),        "CDB: zero key");
+        sessionKeys[runId] = key;
+        emit SessionKeySet(runId, key);
     }
 
     /**
-     * @notice Reveal the committed move and advance the tick.
+     * @notice Submit a move and advance the game tick.
+     *         Callable by the run's player OR the authorized session key.
+     *         No commit-reveal needed — session key provides replay-resistance
+     *         because the key is bound to a specific runId on-chain.
      * @param runId The run ID.
-     * @param move  The move that was committed.
-     * @param salt  The salt used in the commitment.
+     * @param move  The move to apply.
      */
-    function revealAndAdvance(
-        uint256 runId,
-        Move    move,
-        bytes32 salt
-    ) external nonReentrant whenNotPaused {
+    function submitMove(uint256 runId, Move move) external nonReentrant whenNotPaused {
         Run storage run = runs[runId];
-        require(run.active,                             "CDB: inactive");
-        require(run.player == msg.sender,               "CDB: not your run");
-        require(run.commit != bytes32(0),               "CDB: no commit");
-        require(block.timestamp <= run.revealDeadline,  "CDB: reveal expired");
+        require(run.active, "CDB: inactive");
+        require(
+            msg.sender == run.player || msg.sender == sessionKeys[runId],
+            "CDB: unauthorized"
+        );
 
-        bytes32 expected = keccak256(abi.encodePacked(move, salt, msg.sender));
-        require(run.commit == expected, "CDB: commit mismatch");
-
-        run.commit = bytes32(0);
-        emit MoveRevealed(runId, run.tick, move);
-
+        emit MovePlayed(runId, run.tick, move);
         _advanceTick(runId, move);
-    }
-
-    /**
-     * @notice Advance a stalled run with Move.Idle after the reveal window expires.
-     *         Anyone may call — prevents bets being locked in a zombie run.
-     * @param runId The run ID.
-     */
-    function advanceExpired(uint256 runId) external nonReentrant whenNotPaused {
-        Run storage run = runs[runId];
-        require(run.active,                            "CDB: inactive");
-        require(run.commit != bytes32(0),              "CDB: no pending commit");
-        require(block.timestamp > run.revealDeadline,  "CDB: window still open");
-
-        run.commit = bytes32(0);
-        _advanceTick(runId, Move.Idle);
     }
 
     // -------------------------------------------------------------------------

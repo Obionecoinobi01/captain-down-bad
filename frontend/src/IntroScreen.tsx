@@ -20,7 +20,7 @@ const TX_LABEL: Record<string, string> = {
 
 export function IntroScreen({ onStart }: Props) {
   const { address, isConnected } = useAccount()
-  const { connect, connectors } = useConnect()
+  const { connect, connectors, error: connectError } = useConnect()
   const { disconnect } = useDisconnect()
   const { formatted: usdcBalance } = useUsdcBalance(address)
   const { startRun, status, runId, error, reset } = useStartRun(address)
@@ -46,8 +46,6 @@ export function IntroScreen({ onStart }: Props) {
     ? `RUN #${runId.toString()} STARTED!`
     : TX_LABEL[status] ?? '— PRESS START —'
 
-  // Prefer injected (MetaMask / browser wallet), fallback to first available
-  const connector = connectors.find(c => c.id === 'injected') ?? connectors[0]
 
   return (
     <div
@@ -86,12 +84,18 @@ export function IntroScreen({ onStart }: Props) {
           {!isConnected ? (
             <>
               <div className="intro-connect-hint">CONNECT WALLET TO PLAY</div>
-              <button
-                className="intro-connect-btn"
-                onClick={e => { e.stopPropagation(); connect({ connector }) }}
-              >
-                CONNECT WALLET
-              </button>
+              {connectors.map(c => (
+                <button
+                  key={c.id}
+                  className="intro-connect-btn"
+                  onClick={e => { e.stopPropagation(); connect({ connector: c }) }}
+                >
+                  {c.name.toUpperCase()}
+                </button>
+              ))}
+              {connectError && (
+                <div className="intro-error">{connectError.message.slice(0, 100)}</div>
+              )}
             </>
           ) : (
             <>
