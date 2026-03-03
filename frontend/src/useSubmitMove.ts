@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { createWalletClient, http, encodeFunctionData } from 'viem'
+import { createWalletClient, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { usePublicClient } from 'wagmi'
 import { baseSepolia } from 'wagmi/chains'

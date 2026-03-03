@@ -235,8 +235,6 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     /**
      * @notice Submit a move and advance the game tick.
      *         Callable by the run's player OR the authorized session key.
-     *         No commit-reveal needed — session key provides replay-resistance
-     *         because the key is bound to a specific runId on-chain.
      * @param runId The run ID.
      * @param move  The move to apply.
      */
@@ -250,6 +248,31 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
 
         emit MovePlayed(runId, run.tick, move);
         _advanceTick(runId, move);
+    }
+
+    /**
+     * @notice Submit a batch of moves in a single transaction.
+     *         Processes each move in order, stopping early if the run ends.
+     *         Designed for the hybrid local-physics model: the client plays
+     *         locally at 60fps and flushes batches to the chain periodically.
+     * @param runId The run ID.
+     * @param moves Array of moves to apply in sequence. Max 32 per batch.
+     */
+    function submitMoveBatch(uint256 runId, Move[] calldata moves) external nonReentrant whenNotPaused {
+        require(moves.length > 0 && moves.length <= 32, "CDB: bad batch size");
+        Run storage run = runs[runId];
+        require(run.active, "CDB: inactive");
+        require(
+            msg.sender == run.player || msg.sender == sessionKeys[runId],
+            "CDB: unauthorized"
+        );
+
+        for (uint256 i = 0; i < moves.length; i++) {
+            emit MovePlayed(runId, run.tick, moves[i]);
+            _advanceTick(runId, moves[i]);
+            // Stop processing if run ended (health=0 or all gems collected)
+            if (!runs[runId].active) break;
+        }
     }
 
     // -------------------------------------------------------------------------

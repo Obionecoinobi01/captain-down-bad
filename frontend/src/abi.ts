@@ -84,6 +84,16 @@ export const CDB_ABI = [
     ],
     outputs: [],
   },
+  {
+    name: 'submitMoveBatch',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'runId', type: 'uint256'  },
+      { name: 'moves', type: 'uint8[]'  },
+    ],
+    outputs: [],
+  },
   // ── Events ───────────────────────────────────────────────────────────────
   {
     name: 'RunStarted',

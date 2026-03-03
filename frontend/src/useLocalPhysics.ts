@@ -1,0 +1,131 @@
+/**
+ * useLocalPhysics.ts
+ *
+ * React hook that runs the TypeScript physics engine locally at 60fps.
+ * The chain is NOT consulted during gameplay — moves apply instantly.
+ * After each batch confirms on-chain, call syncFromChain() to reconcile.
+ * If the chain state differs, local state snaps to chain truth (anti-cheat).
+ */
+
+import { useCallback, useRef, useState } from 'react'
+import {
+  advanceTick,
+  buildInitialState,
+  packState,
+  unpackState,
+  type Move,
+  type PlayerState,
+} from './physics'
+
+export interface LocalGameState {
+  player:       PlayerState
+  clearedTiles: Set<number>
+  tick:         number
+  active:       boolean
+  won:          boolean
+}
+
+export interface UseLocalPhysicsReturn {
+  /** Current local game state — read this for rendering, not chain state */
+  localState:      LocalGameState
+  /** Apply a move instantly. Returns the updated state. */
+  applyMove:       (move: Move) => LocalGameState
+  /**
+   * Reconcile local state with chain-confirmed state.
+   * Call after each batch tx confirms.
+   * If states match — no-op. If they differ — snap to chain (chain wins).
+   */
+  syncFromChain:   (chainPlayerState: bigint, chainTick: number, chainCleared: Set<number>) => void
+  /** Reset to initial state (new run started). */
+  reset:           (initialPlayerState?: bigint) => void
+  /** Whether the last sync found a desync (useful for debug overlay). */
+  desynced:        boolean
+}
+
+function makeInitialLocalState(packed?: bigint): LocalGameState {
+  return {
+    player:       packed !== undefined ? unpackState(packed) : buildInitialState(),
+    clearedTiles: new Set<number>(),
+    tick:         0,
+    active:       true,
+    won:          false,
+  }
+}
+
+export function useLocalPhysics(initialPlayerState?: bigint): UseLocalPhysicsReturn {
+  const [localState, setLocalState] = useState<LocalGameState>(() =>
+    makeInitialLocalState(initialPlayerState)
+  )
+  const [desynced, setDesynced] = useState(false)
+
+  // Keep a ref in sync so applyMove closure always reads latest
+  const stateRef = useRef<LocalGameState>(localState)
+  stateRef.current = localState
+
+  const applyMove = useCallback((move: Move): LocalGameState => {
+    const gs = stateRef.current
+    if (!gs.active) return gs
+
+    const result = advanceTick(gs.player, gs.clearedTiles, move)
+
+    const next: LocalGameState = {
+      player:       result.state,
+      clearedTiles: result.clearedTiles,
+      tick:         gs.tick + 1,
+      active:       !result.ended,
+      won:          result.won,
+    }
+
+    stateRef.current = next
+    setLocalState(next)
+    return next
+  }, [])
+
+  const syncFromChain = useCallback((
+    chainPlayerState: bigint,
+    chainTick:        number,
+    chainCleared:     Set<number>,
+  ) => {
+    const local = stateRef.current
+    const chainPacked = chainPlayerState
+    const localPacked = packState(local.player)
+
+    // If packed states match exactly — in sync, nothing to do
+    if (localPacked === chainPacked && local.tick === chainTick) {
+      setDesynced(false)
+      return
+    }
+
+    // Desync detected — chain wins, snap local to chain state
+    console.warn('[physics] desync detected — snapping to chain state', {
+      localTick:  local.tick,
+      chainTick,
+      localState: local.player,
+      chainState: unpackState(chainPacked),
+    })
+
+    const snapped: LocalGameState = {
+      player:       unpackState(chainPacked),
+      clearedTiles: chainCleared,
+      tick:         chainTick,
+      active:       local.active,
+      won:          local.won,
+    }
+
+    stateRef.current = snapped
+    setLocalState(snapped)
+    setDesynced(true)
+
+    // Clear the desync flag after 1s (long enough to show feedback if desired)
+    setTimeout(() => setDesynced(false), 1000)
+  }, [])
+
+  const reset = useCallback((packed?: bigint) => {
+    const fresh = makeInitialLocalState(packed)
+    stateRef.current = fresh
+    setLocalState(fresh)
+    setDesynced(false)
+  }, [])
+
+  return { localState, applyMove, syncFromChain, reset, desynced }
+}
