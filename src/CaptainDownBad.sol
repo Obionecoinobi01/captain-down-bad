@@ -59,14 +59,15 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     //    y=15           solid ground all columns
     //    y= 9, x=8-14  floating platform
     //    y= 8, x=10,12 Magical D gems (above platform)
-    //    y= 8, x= 8    enemy patrolling platform
+    //    y= 8, x=8-14  enemy 0 patrol zone (dynamic — NOT in tile map)
     //    y=11, x=16-22 second floating platform
     //    y=10, x=18,20 Magical D gems (above second platform)
     //    y=14, x= 5    spike trap near ground
     //    y=14, x=25    spike trap near ground
-    //    y=14, x=15    enemy patrolling ground level
+    //    y=14, x=6-24  enemy 1 patrol zone (dynamic — NOT in tile map)
     //
     //  4 Magical D gems → LEVEL_0_GEM_COUNT = 4
+    //  Enemies are dynamic (patrol computed from tick) — no tile 4 in map
     //
     bytes private constant LEVEL_MAP_BYTES = hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=0
         hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=1
@@ -76,13 +77,13 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
         hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=5
         hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=6
         hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=7
-        hex"0000000000000000040002000200000000000000000000000000000000000000"  // y=8
+        hex"0000000000000000000002000200000000000000000000000000000000000000"  // y=8  (enemy 0 removed from tile)
         hex"0000000000000000010101010101010000000000000000000000000000000000"  // y=9
         hex"0000000000000000000000000000000000000200020000000000000000000000"  // y=10
         hex"0000000000000000000000000000000001010101010101000000000000000000"  // y=11
         hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=12
         hex"0000000000000000000000000000000000000000000000000000000000000000"  // y=13
-        hex"0000000000030000000000000000000400000000000000000003000000000000"  // y=14
+        hex"0000000000030000000000000000000000000000000000000003000000000000"  // y=14  (enemy 1 removed from tile)
         hex"0101010101010101010101010101010101010101010101010101010101010101"; // y=15
 
     /// @dev Gem tile indices (row-major: y*LEVEL_WIDTH+x) for fast win check.
@@ -111,7 +112,25 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     uint8 private constant TILE_WALL  = 1;
     uint8 private constant TILE_GEM   = 2; // Magical D — collect for score
     uint8 private constant TILE_SPIKE = 3; // damage on contact
-    uint8 private constant TILE_ENEMY = 4; // enemy hit
+    uint8 private constant TILE_ENEMY = 4; // static enemy (custom levels); level 0 uses dynamic patrol
+
+    // -------------------------------------------------------------------------
+    // Enemy patrol constants (level 0)
+    // Enemies are NOT stored in the tile map — their positions are computed
+    // deterministically from (enemyIndex, tick) using a ping-pong patrol.
+    // -------------------------------------------------------------------------
+
+    uint8 private constant ENEMY_COUNT        = 2;
+    // Enemy 0: platform troll (patrols row y=8, above the first platform)
+    uint8 private constant ENEMY_0_Y          = 8;
+    uint8 private constant ENEMY_0_PATROL_MIN = 8;
+    uint8 private constant ENEMY_0_PATROL_MAX = 14;
+    uint8 private constant ENEMY_0_SPEED      = 2;  // moves every 2 ticks
+    // Enemy 1: ground troll (patrols row y=14, wide ground sweep)
+    uint8 private constant ENEMY_1_Y          = 14;
+    uint8 private constant ENEMY_1_PATROL_MIN = 6;
+    uint8 private constant ENEMY_1_PATROL_MAX = 24;
+    uint8 private constant ENEMY_1_SPEED      = 3;  // moves every 3 ticks
 
     // -------------------------------------------------------------------------
     // Types
@@ -159,6 +178,10 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     /// @dev Per-run consumed tiles (gems collected). Avoids mutating shared level data.
     mapping(uint256 runId => mapping(uint256 tileIdx => bool)) private _cleared;
 
+    /// @dev Per-run enemy defeat bitmask. Bit i = 1 means enemy i is defeated.
+    ///      Defaults to 0 (all alive). Max 8 enemies per level (uint8).
+    mapping(uint256 runId => uint8) private _defeated;
+
     /// @notice Claimable by owner; accumulates entry fees from lost runs + house cuts.
     uint256 public houseFees;
 
@@ -171,6 +194,7 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     event MovePlayed(uint256 indexed runId, uint256 tick, Move move);
     event TickAdvanced(uint256 indexed runId, uint256 tick, uint256 playerState);
     event GemCollected(uint256 indexed runId, uint8 posX, uint8 posY, uint256 newScore);
+    event EnemyDefeated(uint256 indexed runId, uint8 indexed enemyIdx, uint256 newScore);
     event RunEnded(uint256 indexed runId, address indexed player, uint256 payout, uint256 finalScore, bool won);
     event LevelSet(uint256 indexed levelId);
     event HouseFeesClaimed(address indexed to, uint256 amount);
@@ -327,13 +351,31 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
         } else if (tile == TILE_SPIKE) {
             if (health > 0) health--;
         } else if (tile == TILE_ENEMY) {
+            // Static enemy tile — used by custom levels (not level 0 which uses dynamic patrol)
             if (move == Move.Punch || move == Move.Kick) {
-                // Defeat the troll — award score and clear the tile.
                 score += uint56(ENEMY_SCORE);
                 _clearTile(runId, posX, posY);
             } else {
-                // Contact damage — no attack means you take a hit.
                 if (health > 0) health--;
+            }
+        }
+
+        // --- Enemy collision (dynamic patrol, level 0 only) ---
+        // Enemy positions are computed from the tick BEFORE increment (run.tick).
+        uint8 def = _defeated[runId];
+        for (uint8 i = 0; i < ENEMY_COUNT; i++) {
+            if ((def >> i) & 1 == 1) continue;                       // already defeated
+            uint8 ePosX = _enemyPosX(i, run.tick);
+            uint8 ePosY = i == 0 ? ENEMY_0_Y : ENEMY_1_Y;
+            if (posX == ePosX && posY == ePosY) {
+                if (move == Move.Punch || move == Move.Kick) {
+                    _defeated[runId] = def | (uint8(1) << i);
+                    score += uint56(ENEMY_SCORE);
+                    emit EnemyDefeated(runId, i, uint256(score));
+                } else {
+                    if (health > 0) health--;
+                }
+                break;                                                // one collision per tick
             }
         }
 
@@ -428,6 +470,39 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
         if (_cleared[runId][GEM_IDX_1]) count++;
         if (_cleared[runId][GEM_IDX_2]) count++;
         if (_cleared[runId][GEM_IDX_3]) count++;
+    }
+
+    // -------------------------------------------------------------------------
+    // Enemy helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * @notice Returns the X position of enemy `idx` at a given tick.
+     *         Pure ping-pong patrol: moves one step every `speed` ticks,
+     *         bouncing between patrolMin and patrolMax.
+     * @dev    Deterministic — same (idx, tick) always yields same result.
+     */
+    function _enemyPosX(uint8 idx, uint256 tick) internal pure returns (uint8) {
+        uint256 pMin;
+        uint256 pMax;
+        uint256 spd;
+        if (idx == 0) {
+            pMin = ENEMY_0_PATROL_MIN; pMax = ENEMY_0_PATROL_MAX; spd = ENEMY_0_SPEED;
+        } else {
+            pMin = ENEMY_1_PATROL_MIN; pMax = ENEMY_1_PATROL_MAX; spd = ENEMY_1_SPEED;
+        }
+        uint256 range  = pMax - pMin;
+        uint256 phase  = (tick / spd) % (range * 2);
+        uint256 offset = phase <= range ? phase : range * 2 - phase;
+        return uint8(pMin + offset);
+    }
+
+    /**
+     * @notice Returns the defeat bitmask for a run. Bit i = 1 means enemy i dead.
+     * @dev    Used by the frontend to sync enemy state after batch confirmation.
+     */
+    function enemyDefeated(uint256 runId) external view returns (uint8) {
+        return _defeated[runId];
     }
 
     // -------------------------------------------------------------------------

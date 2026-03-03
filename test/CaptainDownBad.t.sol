@@ -889,7 +889,8 @@ contract CaptainDownBadTest is Test {
         assertEq(score,  uint56(game.ENEMY_SCORE()), "Kick defeats enemy: score += ENEMY_SCORE");
         assertEq(health, 3,                          "Kick defeats enemy: no damage taken");
 
-        assertEq(game.getTile(8,   8), 4, "getTile: enemy  at (8,8)  in LEVEL_MAP_BYTES");
+        // Level 0 tile map: enemy 0 is now dynamic (patrol), tile (8,8) is air in the static map
+        assertEq(game.getTile(8,   8), 0, "getTile: (8,8) is air; enemy 0 is dynamic patrol in level 0");
         assertEq(game.getTile(10,  8), 2, "getTile: gem    at (10,8) in LEVEL_MAP_BYTES");
         assertEq(game.getTile(0,  15), 1, "getTile: wall   at (0,15) ground row");
         assertEq(game.getTile(255, 0), 0, "getTile: out-of-bounds -> TILE_AIR");

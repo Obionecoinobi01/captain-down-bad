@@ -4,8 +4,10 @@ import { useSessionKey } from './useSessionKey'
 import { useLocalPhysics } from './useLocalPhysics'
 import { useMoveQueue } from './useMoveQueue'
 import { loadSpriteSheet } from './removeBackground'
-import { LEVEL_MAP, LEVEL_WIDTH, Move } from './physics'
+import { LEVEL_MAP, LEVEL_WIDTH, Move, getEnemyPositions } from './physics'
 import type { Move as MoveType } from './physics'
+import { publicClient, CONTRACT_ADDRESS } from './wagmi'
+import { CDB_ABI } from './abi'
 import { MOVE_LABELS } from './useSubmitMove'
 
 interface Props {
@@ -103,12 +105,13 @@ function drawEnemy(
   t: number,
   px: number,
   py: number,
+  row: number = 0,  // 0 = walk, 1 = attack
 ) {
-  const cw = sheet.width  / ENEMY_COLS
-  const ch = sheet.height / ENEMY_ROWS
+  const cw  = sheet.width  / ENEMY_COLS
+  const ch  = sheet.height / ENEMY_ROWS
   const col = Math.floor(t / 8) % ENEMY_COLS   // advance frame every 8 canvas ticks
   const sx  = col * cw
-  const sy  = 0                                 // row 0 = troll walk
+  const sy  = row * ch
   ctx.drawImage(sheet, sx, sy, cw, ch, px - TILE / 2, py - SPR_H + TILE, SPR_W, SPR_H)
 }
 
@@ -143,7 +146,16 @@ export function GameScreen({ runId, onBack }: Props) {
   // ── Move queue (batches moves, submits to chain) ──────────────────────────────
   const handleBatchConfirmed = useCallback(() => {
     // After batch confirms, refetch chain state and reconcile
-    Promise.all([refetch(), fetchClearedGems()]).then(([result, clearedStrings]) => {
+    Promise.all([
+      refetch(),
+      fetchClearedGems(),
+      publicClient.readContract({
+        address:      CONTRACT_ADDRESS,
+        abi:          CDB_ABI,
+        functionName: 'enemyDefeated',
+        args:         [runId],
+      }) as Promise<number>,
+    ]).then(([result, clearedStrings, chainEnemiesDefeated]) => {
       const data = result.data
       if (!data || data[4] === undefined) return
       const chainPlayerState = data[4] as bigint
@@ -154,9 +166,9 @@ export function GameScreen({ runId, onBack }: Props) {
         const [x, y] = k.split(',').map(Number)
         idxSet.add(y * LEVEL_WIDTH + x)
       })
-      syncFromChain(chainPlayerState, chainTick, idxSet)
+      syncFromChain(chainPlayerState, chainTick, idxSet, Number(chainEnemiesDefeated))
     })
-  }, [refetch, fetchClearedGems, syncFromChain])
+  }, [refetch, fetchClearedGems, syncFromChain, runId])
 
   const { enqueue, batchStatus, batchError, pendingCount, flushNow } = useMoveQueue({
     runId,
@@ -231,17 +243,12 @@ export function GameScreen({ runId, onBack }: Props) {
       ctx.fillRect(0, 0, COLS * TILE, ROWS * TILE)
     }
 
-    // Draw tiles — use local clearedTiles set; enemy tiles use spritesheet
-    const enemySheet = enemySheetRef.current
+    // Draw tiles — tile map no longer contains enemy tiles (they are dynamic)
     for (let y = 0; y < ROWS; y++)
       for (let x = 0; x < COLS; x++) {
         const idx  = y * LEVEL_WIDTH + x
         const tile = ls.clearedTiles.has(idx) ? 0 : LEVEL_MAP[idx]
-        if (tile === 4 && enemySheet) {
-          drawEnemy(ctx, enemySheet, t, x * TILE, y * TILE)
-        } else {
-          drawTile(ctx, tile, x * TILE, y * TILE, t)
-        }
+        drawTile(ctx, tile, x * TILE, y * TILE, t)
       }
 
     // Draw captain from local physics position
@@ -253,6 +260,21 @@ export function GameScreen({ runId, onBack }: Props) {
       ctx.shadowBlur  = 6
       drawCaptain(ctx, sheet, ls.player.animFrame, lastMoveRef.current, posX * TILE, posY * TILE)
       ctx.shadowBlur  = 0
+    }
+
+    // Draw dynamic enemies at their computed patrol positions
+    const enemySheet = enemySheetRef.current
+    if (enemySheet) {
+      const enemies = getEnemyPositions(ls.enemiesDefeated, ls.tick)
+      for (const e of enemies) {
+        if (!e.alive) continue
+        const adjacent = Math.abs(e.posX - posX) <= 1 && e.posY === posY
+        const row = adjacent ? 1 : 0    // row 1 = bat-attack, row 0 = walk
+        ctx.shadowColor = '#ff44aa'
+        ctx.shadowBlur  = 5
+        drawEnemy(ctx, enemySheet, t, e.posX * TILE, e.posY * TILE, row)
+        ctx.shadowBlur  = 0
+      }
     }
 
     rafRef.current = requestAnimationFrame(draw)

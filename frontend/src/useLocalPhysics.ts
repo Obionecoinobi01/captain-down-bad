@@ -18,11 +18,12 @@ import {
 } from './physics'
 
 export interface LocalGameState {
-  player:       PlayerState
-  clearedTiles: Set<number>
-  tick:         number
-  active:       boolean
-  won:          boolean
+  player:           PlayerState
+  clearedTiles:     Set<number>
+  enemiesDefeated:  number        // uint8 bitmask — bit i = 1 means enemy i dead
+  tick:             number
+  active:           boolean
+  won:              boolean
 }
 
 export interface UseLocalPhysicsReturn {
@@ -35,7 +36,12 @@ export interface UseLocalPhysicsReturn {
    * Call after each batch tx confirms.
    * If states match — no-op. If they differ — snap to chain (chain wins).
    */
-  syncFromChain:   (chainPlayerState: bigint, chainTick: number, chainCleared: Set<number>) => void
+  syncFromChain:   (
+    chainPlayerState:     bigint,
+    chainTick:            number,
+    chainCleared:         Set<number>,
+    chainEnemiesDefeated: number,
+  ) => void
   /** Reset to initial state (new run started). */
   reset:           (initialPlayerState?: bigint) => void
   /** Whether the last sync found a desync (useful for debug overlay). */
@@ -44,11 +50,12 @@ export interface UseLocalPhysicsReturn {
 
 function makeInitialLocalState(packed?: bigint): LocalGameState {
   return {
-    player:       packed !== undefined ? unpackState(packed) : buildInitialState(),
-    clearedTiles: new Set<number>(),
-    tick:         0,
-    active:       true,
-    won:          false,
+    player:          packed !== undefined ? unpackState(packed) : buildInitialState(),
+    clearedTiles:    new Set<number>(),
+    enemiesDefeated: 0,
+    tick:            0,
+    active:          true,
+    won:             false,
   }
 }
 
@@ -66,14 +73,15 @@ export function useLocalPhysics(initialPlayerState?: bigint): UseLocalPhysicsRet
     const gs = stateRef.current
     if (!gs.active) return gs
 
-    const result = advanceTick(gs.player, gs.clearedTiles, move)
+    const result = advanceTick(gs.player, gs.clearedTiles, move, gs.enemiesDefeated, gs.tick)
 
     const next: LocalGameState = {
-      player:       result.state,
-      clearedTiles: result.clearedTiles,
-      tick:         gs.tick + 1,
-      active:       !result.ended,
-      won:          result.won,
+      player:          result.state,
+      clearedTiles:    result.clearedTiles,
+      enemiesDefeated: result.enemiesDefeated,
+      tick:            gs.tick + 1,
+      active:          !result.ended,
+      won:             result.won,
     }
 
     stateRef.current = next
@@ -82,41 +90,47 @@ export function useLocalPhysics(initialPlayerState?: bigint): UseLocalPhysicsRet
   }, [])
 
   const syncFromChain = useCallback((
-    chainPlayerState: bigint,
-    chainTick:        number,
-    chainCleared:     Set<number>,
+    chainPlayerState:     bigint,
+    chainTick:            number,
+    chainCleared:         Set<number>,
+    chainEnemiesDefeated: number,
   ) => {
     const local = stateRef.current
-    const chainPacked = chainPlayerState
     const localPacked = packState(local.player)
 
-    // If packed states match exactly — in sync, nothing to do
-    if (localPacked === chainPacked && local.tick === chainTick) {
+    // If everything matches — in sync, nothing to do
+    if (
+      localPacked === chainPlayerState &&
+      local.tick  === chainTick &&
+      local.enemiesDefeated === chainEnemiesDefeated
+    ) {
       setDesynced(false)
       return
     }
 
     // Desync detected — chain wins, snap local to chain state
     console.warn('[physics] desync detected — snapping to chain state', {
-      localTick:  local.tick,
+      localTick:    local.tick,
       chainTick,
-      localState: local.player,
-      chainState: unpackState(chainPacked),
+      localState:   local.player,
+      chainState:   unpackState(chainPlayerState),
+      localEnemies: local.enemiesDefeated,
+      chainEnemies: chainEnemiesDefeated,
     })
 
     const snapped: LocalGameState = {
-      player:       unpackState(chainPacked),
-      clearedTiles: chainCleared,
-      tick:         chainTick,
-      active:       local.active,
-      won:          local.won,
+      player:          unpackState(chainPlayerState),
+      clearedTiles:    chainCleared,
+      enemiesDefeated: chainEnemiesDefeated,
+      tick:            chainTick,
+      active:          local.active,
+      won:             local.won,
     }
 
     stateRef.current = snapped
     setLocalState(snapped)
     setDesynced(true)
 
-    // Clear the desync flag after 1s (long enough to show feedback if desired)
     setTimeout(() => setDesynced(false), 1000)
   }, [])
 

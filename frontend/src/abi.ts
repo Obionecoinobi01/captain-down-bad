@@ -30,6 +30,13 @@ export const CDB_ABI = [
     outputs: [{ name: '', type: 'address' }],
   },
   {
+    name: 'enemyDefeated',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ name: 'runId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint8' }],
+  },
+  {
     name: 'getTile',
     type: 'function',
     stateMutability: 'pure',
@@ -138,6 +145,15 @@ export const CDB_ABI = [
       { name: 'runId',    type: 'uint256', indexed: true  },
       { name: 'posX',     type: 'uint8',   indexed: false },
       { name: 'posY',     type: 'uint8',   indexed: false },
+      { name: 'newScore', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    name: 'EnemyDefeated',
+    type: 'event',
+    inputs: [
+      { name: 'runId',    type: 'uint256', indexed: true  },
+      { name: 'enemyIdx', type: 'uint8',   indexed: true  },
       { name: 'newScore', type: 'uint256', indexed: false },
     ],
   },
