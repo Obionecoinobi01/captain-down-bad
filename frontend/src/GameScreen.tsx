@@ -229,6 +229,10 @@ export function GameScreen({ runId, onBack }: Props) {
   const actionsRef     = useRef<HTMLCanvasElement | null>(null)   // captain actions sheet
   const enemySheetRef  = useRef<HTMLCanvasElement | null>(null)   // troll
   const demonSheetRef  = useRef<HTMLCanvasElement | null>(null)   // demon
+  const bossSheetRef   = useRef<HTMLCanvasElement | null>(null)   // cosmic dancer boss
+  const bossStateRef   = useRef<{ active: boolean; tick: number; phase: 'enter'|'idle'|'attack'|'exit' }>({
+    active: false, tick: 0, phase: 'enter'
+  })
   const bgRef          = useRef<HTMLImageElement | null>(null)
   const lastMoveRef    = useRef<MoveType | null>(null)
 
@@ -263,6 +267,7 @@ export function GameScreen({ runId, onBack }: Props) {
     loadSpriteSheet('/img/sprites/captain_actions.png').then(c => { actionsRef.current = c })
     loadSpriteSheet('/img/sprites/enemy_troll_new.png').then(c => { enemySheetRef.current = c })
     loadSpriteSheet('/img/sprites/enemy_demon_new.png').then(c => { demonSheetRef.current = c })
+    loadSpriteSheet('/img/sprites/boss_dancer.png').then(c => { bossSheetRef.current = c })
     const bg = new Image()
     bg.src = '/img/background_new.png'
     bg.onload = () => { bgRef.current = bg }
@@ -432,6 +437,61 @@ export function GameScreen({ runId, onBack }: Props) {
         drawEnemy(ctx, sheet, t, esx, esy, row, e.facing)
         ctx.shadowBlur  = 0
       })
+    }
+
+    // ── Boss: Cosmic Dancer — appears at end of every round ───────────────────
+    const bossSheet = bossSheetRef.current
+    const boss = bossStateRef.current
+    const score = Number((ls.playerState >> BigInt(0)) & BigInt(0xFFFFFFFFFFFFFF))
+    // Trigger boss every 5 gems collected (score increments by 10 per gem)
+    const roundEnd = score > 0 && score % 50 === 0
+    if (roundEnd && !boss.active) {
+      boss.active = true; boss.tick = 0; boss.phase = 'enter'
+    }
+    if (boss.active) {
+      boss.tick++
+      // Phase transitions
+      if (boss.phase === 'enter'  && boss.tick > 60)  { boss.phase = 'attack'; boss.tick = 0 }
+      if (boss.phase === 'attack' && boss.tick > 90)  { boss.phase = 'idle';   boss.tick = 0 }
+      if (boss.phase === 'idle'   && boss.tick > 60)  { boss.phase = 'exit';   boss.tick = 0 }
+      if (boss.phase === 'exit'   && boss.tick > 60)  { boss.active = false;   boss.tick = 0 }
+
+      if (bossSheet) {
+        const BOSS_W = SPR_W * 4   // 4× normal size
+        const BOSS_H = SPR_H * 4
+        const bx = (CANVAS_W - BOSS_W) / 2
+        const by = (CANVAS_H - BOSS_H) / 2 - TILE * 2
+        const rowMap = { enter: 2, idle: 0, attack: 1, exit: 3 } as const
+        const row  = rowMap[boss.phase]
+        const col  = Math.floor(boss.tick / 12) % 3
+        const cw   = bossSheet.width  / 3
+        const ch   = bossSheet.height / 4
+        // Pulsing purple glow
+        const pulse = (Math.sin(boss.tick * 0.1) + 1) * 0.5
+        ctx.shadowColor = '#9933ff'
+        ctx.shadowBlur  = 20 + pulse * 20
+        // Fade in/out on enter/exit
+        const alpha = boss.phase === 'enter' ? Math.min(1, boss.tick / 40)
+                    : boss.phase === 'exit'  ? Math.max(0, 1 - boss.tick / 40) : 1
+        ctx.globalAlpha = alpha
+        ctx.drawImage(bossSheet, col * cw, row * ch, cw, ch, bx, by, BOSS_W, BOSS_H)
+        ctx.globalAlpha = 1
+        ctx.shadowBlur  = 0
+
+        // Boss nameplate — "COSMIC DANCER" warning banner
+        if (boss.phase === 'enter' || boss.phase === 'attack') {
+          ctx.fillStyle = `rgba(153,51,255,${alpha * 0.85})`
+          ctx.fillRect(0, CANVAS_H / 2 - 28, CANVAS_W, 22)
+          ctx.fillStyle = '#ffffff'
+          ctx.font = 'bold 11px monospace'
+          ctx.textAlign = 'center'
+          ctx.fillText('⚠  Euphoria!  ⚠', CANVAS_W / 2, CANVAS_H / 2 - 11)
+          ctx.fillStyle = '#ffccff'
+          ctx.font = '8px monospace'
+          ctx.fillText("Captain Down Bad's greatest weakness...", CANVAS_W / 2, CANVAS_H / 2 + 2)
+          ctx.textAlign = 'left'
+        }
+      }
     }
 
     // Restore transform after shake
