@@ -36,19 +36,23 @@ const CELL_H = 312
 const WALK_FRAMES = [0, 1, 2, 3, 4, 5].map(i => ({
   sx: (i % 3) * CELL_W, sy: Math.floor(i / 3) * CELL_H, sw: CELL_W, sh: CELL_H,
 }))
-const PUNCH_FRAME = { sx: 0,      sy: CELL_H * 2, sw: CELL_W, sh: CELL_H }
-const KICK_FRAME  = { sx: CELL_W, sy: CELL_H * 2, sw: CELL_W, sh: CELL_H }
-const JUMP_FRAME  = { sx: CELL_W, sy: CELL_H * 3, sw: CELL_W, sh: CELL_H }
+// Action frames from captain_actions.png (832×624, 3 cols × 2 rows)
+// Row 0: punch, kick, jump  |  Row 1: hurt, idle, land
+const PUNCH_FRAME = { sx: 0,          sy: 0,      sw: CELL_W, sh: CELL_H }
+const KICK_FRAME  = { sx: CELL_W,     sy: 0,      sw: CELL_W, sh: CELL_H }
+const JUMP_FRAME  = { sx: CELL_W * 2, sy: 0,      sw: CELL_W, sh: CELL_H }
+const HURT_FRAME  = { sx: 0,          sy: CELL_H, sw: CELL_W, sh: CELL_H }
 const SPR_W = TILE * 2   // 32px
 const SPR_H = TILE * 3   // 48px
 
-// ── Enemy spritesheet layout (4 cols × 3 rows) ────────────────────────────────
-// Row 0: troll walk cycle (4 frames)
-// Row 1: troll bat-attack cycle (4 frames)  — used for active/alerted state
-// Row 2: old man idle cycle (4 frames)
+// ── Enemy spritesheet layout (3 cols × 4 rows, 832×1248) ─────────────────────
+// Row 0: walk cycle frames 0-2
+// Row 1: attack cycle frames 0-2
+// Row 2: idle frames 0-2
+// Row 3: defeat frames 0-2
 // Cell dimensions computed at runtime from loaded image size
-const ENEMY_COLS = 4
-const ENEMY_ROWS = 3
+const ENEMY_COLS = 3
+const ENEMY_ROWS = 4
 
 // ── Drawing helpers ────────────────────────────────────────────────────────────
 function drawTile(ctx: CanvasRenderingContext2D, tile: number, px: number, py: number, t: number) {
@@ -96,7 +100,8 @@ function drawTile(ctx: CanvasRenderingContext2D, tile: number, px: number, py: n
 
 function drawCaptain(
   ctx: CanvasRenderingContext2D,
-  sheet: HTMLCanvasElement,
+  walkSheet: HTMLCanvasElement,
+  actSheet: HTMLCanvasElement | null,
   t: number,
   lastMove: MoveType | null,
   px: number,
@@ -104,21 +109,21 @@ function drawCaptain(
   facing: number,   // 1 = right, -1 = left
 ) {
   let frame: typeof PUNCH_FRAME
-  if      (lastMove === Move.Punch) frame = PUNCH_FRAME
-  else if (lastMove === Move.Kick)  frame = KICK_FRAME
-  else if (lastMove === Move.Jump)  frame = JUMP_FRAME
-  else frame = WALK_FRAMES[Math.floor(t / 6) % WALK_FRAMES.length]
+  let src: HTMLCanvasElement
+  if (lastMove === Move.Punch && actSheet) { frame = PUNCH_FRAME; src = actSheet }
+  else if (lastMove === Move.Kick && actSheet)  { frame = KICK_FRAME;  src = actSheet }
+  else if (lastMove === Move.Jump && actSheet)  { frame = JUMP_FRAME;  src = actSheet }
+  else { frame = WALK_FRAMES[Math.floor(t / 6) % WALK_FRAMES.length]; src = walkSheet }
 
   const dx = px - TILE / 2
   const dy = py - SPR_H + TILE
   ctx.save()
   if (facing === -1) {
-    // Mirror horizontally: translate to right edge then scale -1
     ctx.translate(dx + SPR_W, 0)
     ctx.scale(-1, 1)
-    ctx.drawImage(sheet, frame.sx, frame.sy, frame.sw, frame.sh, 0, dy, SPR_W, SPR_H)
+    ctx.drawImage(src, frame.sx, frame.sy, frame.sw, frame.sh, 0, dy, SPR_W, SPR_H)
   } else {
-    ctx.drawImage(sheet, frame.sx, frame.sy, frame.sw, frame.sh, dx, dy, SPR_W, SPR_H)
+    ctx.drawImage(src, frame.sx, frame.sy, frame.sw, frame.sh, dx, dy, SPR_W, SPR_H)
   }
   ctx.restore()
 }
@@ -220,8 +225,10 @@ export function GameScreen({ runId, onBack }: Props) {
   const frameRef    = useRef(0)
   const localRef    = useRef(localState)
   localRef.current  = localState
-  const spriteRef      = useRef<HTMLCanvasElement | null>(null)
-  const enemySheetRef  = useRef<HTMLCanvasElement | null>(null)
+  const spriteRef      = useRef<HTMLCanvasElement | null>(null)   // captain walk sheet
+  const actionsRef     = useRef<HTMLCanvasElement | null>(null)   // captain actions sheet
+  const enemySheetRef  = useRef<HTMLCanvasElement | null>(null)   // troll
+  const demonSheetRef  = useRef<HTMLCanvasElement | null>(null)   // demon
   const bgRef          = useRef<HTMLImageElement | null>(null)
   const lastMoveRef    = useRef<MoveType | null>(null)
 
@@ -252,10 +259,12 @@ export function GameScreen({ runId, onBack }: Props) {
 
   // Load sprite sheets with background removal + background image
   useEffect(() => {
-    loadSpriteSheet('/sprites/captain-normal.png').then(c => { spriteRef.current = c })
-    loadSpriteSheet('/sprites/enemy-troll.png').then(c => { enemySheetRef.current = c })
+    loadSpriteSheet('/img/sprites/captain_1.png').then(c => { spriteRef.current = c })
+    loadSpriteSheet('/img/sprites/captain_actions.png').then(c => { actionsRef.current = c })
+    loadSpriteSheet('/img/sprites/enemy_troll_new.png').then(c => { enemySheetRef.current = c })
+    loadSpriteSheet('/img/sprites/enemy_demon_new.png').then(c => { demonSheetRef.current = c })
     const bg = new Image()
-    bg.src = '/sprites/background.png'
+    bg.src = '/img/background_new.png'
     bg.onload = () => { bgRef.current = bg }
   }, [])
 
@@ -398,28 +407,31 @@ export function GameScreen({ runId, onBack }: Props) {
     if (sheet) {
       ctx.shadowColor = '#4499ff'
       ctx.shadowBlur  = 8
-      drawCaptain(ctx, sheet, t, lastMoveRef.current,
+      drawCaptain(ctx, sheet, actionsRef.current, t, lastMoveRef.current,
         posX * TILE + ox, posY * TILE + oy, facingRef.current)
       ctx.shadowBlur  = 0
     }
 
     // Draw dynamic enemies — cull those outside viewport
     const enemySheet = enemySheetRef.current
+    const demonSheet = demonSheetRef.current
     if (enemySheet) {
       const enemies = getEnemyPositions(ls.enemiesDefeated, ls.tick)
-      for (const e of enemies) {
-        if (!e.alive) continue
+      enemies.forEach((e, i) => {
+        if (!e.alive) return
         const esx = e.posX * TILE + ox
         const esy = e.posY * TILE + oy
-        if (esx < -TILE * 2 || esx > CANVAS_W + TILE) continue
-        if (esy < -TILE * 2 || esy > CANVAS_H + TILE) continue
+        if (esx < -TILE * 2 || esx > CANVAS_W + TILE) return
+        if (esy < -TILE * 2 || esy > CANVAS_H + TILE) return
         const adjacent = Math.abs(e.posX - posX) <= 1 && e.posY === posY
-        const row = adjacent ? 1 : 0    // row 1 = bat-attack, row 0 = walk
-        ctx.shadowColor = '#ff44aa'
+        const row = adjacent ? 1 : 0    // row 1 = attack, row 0 = walk
+        // Alternate enemy types: even index = troll, odd index = demon
+        const sheet = (i % 2 === 1 && demonSheet) ? demonSheet : enemySheet
+        ctx.shadowColor = i % 2 === 1 ? '#ff2200' : '#ff44aa'
         ctx.shadowBlur  = 6
-        drawEnemy(ctx, enemySheet, t, esx, esy, row, e.facing)
+        drawEnemy(ctx, sheet, t, esx, esy, row, e.facing)
         ctx.shadowBlur  = 0
-      }
+      })
     }
 
     // Restore transform after shake
