@@ -275,6 +275,8 @@ export function GameScreen({ runId, onBack }: Props) {
     dustParticles: [] as Array<{x: number; y: number; vx: number; vy: number; age: number}>,
   })
   const portalRef      = useRef(false)                     // true after intro ends
+  const hitstopRef     = useRef(0)                         // remaining freeze frames
+  const hitSparkRef    = useRef<{tx: number; ty: number} | null>(null)  // hit spark tile pos
 
   // Init WebGL post-processing
   useEffect(() => {
@@ -325,6 +327,20 @@ export function GameScreen({ runId, onBack }: Props) {
       if (move === Move.Jump)  playJump()
       if (move === Move.Punch) playPunch()
       if (move === Move.Kick)  playKick()
+      // Detect hit connect for hitstop — check before applyMove so tick is current
+      if (move === Move.Punch || move === Move.Kick) {
+        const curLs = localRef.current
+        const enemies = getEnemyPositions(curLs.enemiesDefeated, curLs.tick)
+        const hitEnemy = enemies.find(en =>
+          en.alive &&
+          Math.abs(en.posX - curLs.player.posX) <= 1 &&
+          en.posY === curLs.player.posY
+        )
+        if (hitEnemy) {
+          hitstopRef.current  = move === Move.Kick ? 6 : 4
+          hitSparkRef.current = { tx: hitEnemy.posX, ty: hitEnemy.posY }
+        }
+      }
       applyMove(move)   // instant local physics
       enqueue(move)     // queued for chain
     }
@@ -341,7 +357,12 @@ export function GameScreen({ runId, onBack }: Props) {
     const retro    = glStateRef.current
     if (!ctx || !canvas) { rafRef.current = requestAnimationFrame(draw); return }
 
-    frameRef.current++
+    // Hitstop: freeze animation counter while > 0 (SoR-style freeze on clean hit)
+    if (hitstopRef.current > 0) {
+      hitstopRef.current--
+    } else {
+      frameRef.current++
+    }
     const t  = frameRef.current
     const ls = localRef.current
 
@@ -572,8 +593,9 @@ export function GameScreen({ runId, onBack }: Props) {
     prevHealthRef.current = hp
 
     if (defs > prevEnemiesRef.current) {
-      // Enemy killed — cyan flash + SFX
+      // Enemy killed — cyan flash + longer hitstop + SFX
       defFlashRef.current = 0.85
+      hitstopRef.current  = Math.max(hitstopRef.current, 8)  // kill = 8f freeze
       playEnemyDefeat()
     }
     prevEnemiesRef.current = defs
@@ -681,6 +703,28 @@ export function GameScreen({ runId, onBack }: Props) {
         drawEnemy(ctx, sheet, t, esx, esy, row, e.facing)
         ctx.shadowBlur  = 0
       })
+    }
+
+    // ── Hit spark — starburst at contact point during hitstop ─────────────────
+    const spark = hitSparkRef.current
+    if (spark && hitstopRef.current > 0) {
+      const sx = spark.tx * TILE + ox + TILE / 2
+      const sy = spark.ty * TILE + oy
+      const fade = hitstopRef.current / 8
+      ctx.save()
+      ctx.shadowColor = '#ffee44'
+      ctx.shadowBlur  = 6
+      for (let r = 0; r < 8; r++) {
+        const angle = (r / 8) * Math.PI * 2
+        const len   = TILE * 0.7
+        ctx.strokeStyle = `rgba(255,230,60,${fade})`
+        ctx.lineWidth   = 1.5
+        ctx.beginPath()
+        ctx.moveTo(sx, sy)
+        ctx.lineTo(sx + Math.cos(angle) * len, sy + Math.sin(angle) * len)
+        ctx.stroke()
+      }
+      ctx.restore()
     }
 
     // ── Boss: Cosmic Dancer — appears at end of every round ───────────────────
