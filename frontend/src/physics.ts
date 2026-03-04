@@ -240,15 +240,18 @@ export function advanceTick(
     if ((def >> i) & 1) continue          // already defeated
     const ePosX = enemyPosX(i, tick)
     const ePosY = ENEMY_Y[i]
-    if (posX === ePosX && posY === ePosY) {
-      if (move === Move.Punch || move === Move.Kick) {
+    if (move === Move.Punch || move === Move.Kick) {
+      // Attack has ±1 tile reach (player can punch from adjacent tile)
+      if (Math.abs(posX - ePosX) <= 1 && posY === ePosY) {
         def = def | (1 << i)
         score += ENEMY_SCORE
         enemyDefeated = true
-      } else {
-        if (health > 0) health--
+        break
       }
-      break                               // one collision per tick
+    } else if (posX === ePosX && posY === ePosY) {
+      // Damage zone: exact tile only (can't be hit from adjacent tile)
+      if (health > 0) health--
+      break
     }
   }
 

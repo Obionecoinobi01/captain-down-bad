@@ -367,15 +367,19 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
             if ((def >> i) & 1 == 1) continue;                       // already defeated
             uint8 ePosX = _enemyPosX(i, run.tick);
             uint8 ePosY = i == 0 ? ENEMY_0_Y : ENEMY_1_Y;
-            if (posX == ePosX && posY == ePosY) {
-                if (move == Move.Punch || move == Move.Kick) {
+            if (move == Move.Punch || move == Move.Kick) {
+                // Attack has ±1 tile reach (player can punch from adjacent tile)
+                uint8 dx = posX >= ePosX ? posX - ePosX : ePosX - posX;
+                if (dx <= 1 && posY == ePosY) {
                     _defeated[runId] = def | (uint8(1) << i);
                     score += uint56(ENEMY_SCORE);
                     emit EnemyDefeated(runId, i, uint256(score));
-                } else {
-                    if (health > 0) health--;
+                    break;
                 }
-                break;                                                // one collision per tick
+            } else if (posX == ePosX && posY == ePosY) {
+                // Damage zone: exact tile only
+                if (health > 0) health--;
+                break;
             }
         }
 

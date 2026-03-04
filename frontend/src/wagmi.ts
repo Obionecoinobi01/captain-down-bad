@@ -15,7 +15,7 @@ export const config = createConfig({
   ],
 })
 
-export const CONTRACT_ADDRESS = '0x4aeD1b5acDc038c766993C924B36D1c5D03d7712' as const
+export const CONTRACT_ADDRESS = '0xb2cB4F55C1A700BF50FacdFa291cb9874fAFa8a9' as const
 export const USDC_ADDRESS     = '0x036CbD53842c5426634e7929541eC2318f3dCF7e' as const
 
 export const publicClient = createPublicClient({
