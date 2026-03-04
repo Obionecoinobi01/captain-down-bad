@@ -155,6 +155,29 @@ function drawEnemy(
   ctx.restore()
 }
 
+function drawPortal(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, alpha: number) {
+  const pulse = (Math.sin(t * 0.05) + 1) * 0.5
+  ctx.globalAlpha = alpha
+  ctx.strokeStyle = `rgba(153,51,255,${0.7 + pulse * 0.3})`
+  ctx.lineWidth   = 3
+  ctx.shadowColor = '#9933ff'
+  ctx.shadowBlur  = 12 + pulse * 8
+  ctx.beginPath()
+  ctx.ellipse(x + TILE * 2, y + TILE, TILE * 2, TILE * 0.8, 0, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.fillStyle = `rgba(153,51,255,${0.12 + pulse * 0.08})`
+  ctx.beginPath()
+  ctx.ellipse(x + TILE * 2, y + TILE, TILE * 2, TILE * 0.8, 0, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.shadowBlur  = 0
+  ctx.fillStyle   = '#cc88ff'
+  ctx.font        = '5px monospace'
+  ctx.textAlign   = 'center'
+  ctx.fillText('EXIT', x + TILE * 2, y + TILE + 2)
+  ctx.textAlign   = 'left'
+  ctx.globalAlpha = 1
+}
+
 // ── Keyboard → Move mapping ────────────────────────────────────────────────────
 const KEY_MOVE: Record<string, MoveType> = {
   ArrowLeft:  Move.Left,  a: Move.Left,  A: Move.Left,
@@ -246,6 +269,12 @@ export function GameScreen({ runId, onBack }: Props) {
   const prevScoreRef   = useRef(0)
   const cameraRef      = useRef({ x: 0, y: 0 })           // smooth-follow camera (tile units)
   const facingRef      = useRef(1)                         // captain facing: 1=right, -1=left
+  const introRef       = useRef({
+    active: true, frame: 0,
+    gemSparkles:   [] as Array<{x: number; y: number; age: number}>,
+    dustParticles: [] as Array<{x: number; y: number; vx: number; vy: number; age: number}>,
+  })
+  const portalRef      = useRef(false)                     // true after intro ends
 
   // Init WebGL post-processing
   useEffect(() => {
@@ -286,6 +315,7 @@ export function GameScreen({ runId, onBack }: Props) {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (!canMoveRef.current) return
+      if (introRef.current.active) return
       const move = KEY_MOVE[e.key]
       if (move === undefined) return
       e.preventDefault()
@@ -314,6 +344,215 @@ export function GameScreen({ runId, onBack }: Props) {
     frameRef.current++
     const t  = frameRef.current
     const ls = localRef.current
+
+    // ── INTRO SEQUENCE ────────────────────────────────────────────────────────
+    const intro = introRef.current
+    ctx.imageSmoothingEnabled = false
+    if (intro.active) {
+      intro.frame++
+      const f = intro.frame
+
+      // Camera (pixel-based): follows Euphoria then pans back to start
+      const CAM_MAX = (COLS - VIEWPORT_W) * TILE   // 192px
+      let introCamX = 0
+      if (f >= 20 && f < 280) {
+        introCamX = Math.min(CAM_MAX, ((f - 20) / 260) * CAM_MAX)
+      } else if (f >= 280 && f < 360) {
+        introCamX = CAM_MAX
+      } else if (f >= 360 && f < 480) {
+        const p = (f - 360) / 120
+        const eased = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2
+        introCamX = CAM_MAX * (1 - eased)
+      }
+      const ox = -introCamX
+
+      // Background
+      const bg = bgRef.current
+      if (bg) {
+        ctx.drawImage(bg,
+          (introCamX / (COLS * TILE)) * bg.naturalWidth, 0,
+          (CANVAS_W / (COLS * TILE)) * bg.naturalWidth, bg.naturalHeight,
+          0, 0, CANVAS_W, CANVAS_H)
+      } else {
+        ctx.fillStyle = '#06060f'
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+      }
+
+      // Level tiles
+      const tx0 = Math.floor(introCamX / TILE)
+      for (let iy = 0; iy <= VIEWPORT_H + 1; iy++) {
+        for (let ix = tx0; ix <= tx0 + VIEWPORT_W + 1; ix++) {
+          if (ix < 0 || ix >= COLS || iy < 0 || iy >= ROWS) continue
+          const tile = ls.clearedTiles.has(iy * LEVEL_WIDTH + ix) ? 0 : LEVEL_MAP[iy * LEVEL_WIDTH + ix]
+          drawTile(ctx, tile, ix * TILE + ox, iy * TILE, t)
+        }
+      }
+
+      // Portal at right end materialises from f=240
+      if (f >= 240) {
+        const pAlpha = Math.min(1, (f - 240) / 80)
+        drawPortal(ctx, (COLS - 4) * TILE + ox, 9 * TILE, t, pAlpha)
+      }
+
+      // Euphoria flies L→R (f 20-420)
+      const introBossSheet = bossSheetRef.current
+      if (introBossSheet && f >= 20 && f < 420) {
+        const flyT  = Math.min(1, (f - 20) / 260)
+        const eupWX = (1 + flyT * (COLS - 7)) * TILE   // world x
+        const eupSX = eupWX + ox                        // screen x
+        const eupY  = 3 * TILE + Math.sin(f * 0.05) * TILE * 0.5
+        if (f % 40 === 20 && f < 300) {
+          intro.gemSparkles.push({ x: eupWX + TILE, y: eupY + TILE * 2.5, age: 0 })
+        }
+        const BOSS_W = SPR_W * 3
+        const BOSS_H = SPR_H * 3
+        const bcw   = introBossSheet.width  / 3
+        const bch   = introBossSheet.height / 4
+        const bcol  = Math.floor(t / 10) % 3
+        const bAlpha = f > 360 ? Math.max(0, 1 - (f - 360) / 60) : 1
+        const pulse  = (Math.sin(t * 0.1) + 1) * 0.5
+        ctx.globalAlpha = bAlpha
+        ctx.shadowColor = '#9933ff'
+        ctx.shadowBlur  = 12 + pulse * 10
+        ctx.drawImage(introBossSheet, bcol * bcw, 1 * bch, bcw, bch,
+          eupSX - BOSS_W / 2, eupY, BOSS_W, BOSS_H)
+        ctx.shadowBlur  = 0
+        ctx.globalAlpha = 1
+      }
+
+      // Gem sparkles dropped by Euphoria
+      intro.gemSparkles = intro.gemSparkles.filter(sp => sp.age < 50)
+      for (const sp of intro.gemSparkles) {
+        sp.age++
+        ctx.globalAlpha = Math.max(0, 1 - sp.age / 50)
+        ctx.fillStyle   = '#00ffcc'
+        ctx.shadowColor = '#00ffcc'
+        ctx.shadowBlur  = 6
+        ctx.fillRect(sp.x + ox - 2, sp.y + sp.age * 0.4, 4, 4)
+        ctx.shadowBlur  = 0
+        ctx.globalAlpha = 1
+      }
+
+      // Captain falls from sky at tile (2, 8)
+      const cLandX = 2 * TILE
+      const cLandY = 8 * TILE
+      if (f >= 480 && f < 510) {
+        const sp = (f - 480) / 30
+        const sy = -TILE * 2 + (cLandY + TILE * 2) * sp
+        ctx.strokeStyle = '#44aaff'
+        ctx.lineWidth   = 3
+        ctx.shadowColor = '#44aaff'
+        ctx.shadowBlur  = 14
+        ctx.beginPath()
+        ctx.moveTo(cLandX + TILE / 2, sy - TILE * 3)
+        ctx.lineTo(cLandX + TILE / 2, sy)
+        ctx.stroke()
+        ctx.shadowBlur  = 0
+      }
+
+      if (f >= 510) {
+        // Spawn dust on first landing frame
+        if (intro.dustParticles.length === 0) {
+          for (let d = 0; d < 14; d++) {
+            const angle = (d / 14) * Math.PI * 2
+            intro.dustParticles.push({
+              x: cLandX + TILE / 2, y: cLandY,
+              vx: Math.cos(angle) * (0.8 + Math.random() * 1.5),
+              vy: Math.sin(angle) * (0.8 + Math.random() * 1.5) - 1.5,
+              age: 0,
+            })
+          }
+        }
+        // Draw + advance dust particles
+        for (const p of intro.dustParticles) {
+          p.x += p.vx; p.y += p.vy; p.vy += 0.25; p.age++
+          if (p.age < 35) {
+            ctx.globalAlpha = Math.max(0, 1 - p.age / 35)
+            ctx.fillStyle   = '#aaccff'
+            ctx.fillRect(p.x, p.y, 3, 3)
+            ctx.globalAlpha = 1
+          }
+        }
+        // Impact ring (f 510-540)
+        if (f < 540) {
+          const rp = (f - 510) / 30
+          ctx.strokeStyle = `rgba(100,180,255,${(1 - rp) * 0.9})`
+          ctx.lineWidth   = 2
+          ctx.beginPath()
+          ctx.arc(cLandX + TILE / 2, cLandY, rp * TILE * 4, 0, Math.PI * 2)
+          ctx.stroke()
+        }
+        // Captain sprite
+        const captSheet = spriteRef.current
+        if (captSheet) {
+          ctx.shadowColor = '#4499ff'
+          ctx.shadowBlur  = 8
+          drawCaptain(ctx, captSheet, actionsRef.current, t, Move.Idle, cLandX, cLandY, 1)
+          ctx.shadowBlur  = 0
+        }
+        // Power-down ring (f 540-600)
+        if (f >= 540 && f < 600) {
+          const rp = (f - 540) / 60
+          ctx.strokeStyle = `rgba(68,153,255,${(1 - rp) * 0.7})`
+          ctx.lineWidth   = Math.max(0.5, 2 - rp * 2)
+          ctx.shadowColor = '#4499ff'
+          ctx.shadowBlur  = 8
+          ctx.beginPath()
+          ctx.arc(cLandX + TILE / 2, cLandY, TILE + rp * TILE * 4, 0, Math.PI * 2)
+          ctx.stroke()
+          ctx.shadowBlur  = 0
+        }
+        // Dialogue bubble (f 600-700)
+        if (f >= 600) {
+          const fullText  = 'I Better Power Down, there are civilians around'
+          const charCount = Math.min(fullText.length, Math.floor((f - 600) / 1.2))
+          const dispText  = fullText.slice(0, charCount)
+          const dAlpha    = Math.min(1, (f - 600) / 20)
+          const bx = Math.min(CANVAS_W - 158, Math.max(2, cLandX - 74))
+          const by = cLandY - SPR_H - 40
+          ctx.globalAlpha = dAlpha
+          ctx.fillStyle   = 'rgba(0,0,0,0.88)'
+          ctx.strokeStyle = '#4499ff'
+          ctx.lineWidth   = 1.5
+          ctx.beginPath()
+          ctx.rect(bx, by, 154, 33)
+          ctx.fill(); ctx.stroke()
+          ctx.fillStyle = '#ffffff'
+          ctx.font      = '7px monospace'
+          ctx.textAlign = 'left'
+          ctx.fillText(dispText.slice(0, 25), bx + 5, by + 12)
+          if (dispText.length > 25) ctx.fillText(dispText.slice(25), bx + 5, by + 24)
+          // bubble tail
+          ctx.fillStyle   = 'rgba(0,0,0,0.88)'
+          ctx.strokeStyle = '#4499ff'
+          ctx.beginPath()
+          ctx.moveTo(cLandX + TILE / 2 - 4, by + 33)
+          ctx.lineTo(cLandX + TILE / 2 + 8, by + 33)
+          ctx.lineTo(cLandX + TILE / 2 + 2, cLandY - SPR_H + 6)
+          ctx.closePath()
+          ctx.fill(); ctx.stroke()
+          ctx.globalAlpha = 1
+        }
+      }
+
+      // Fade in from black (f 0-20)
+      if (f <= 20) {
+        ctx.fillStyle = `rgba(0,0,0,${Math.max(0, 1 - f / 20)})`
+        ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
+      }
+
+      // End intro — activate portal
+      if (f >= 700) {
+        intro.active      = false
+        portalRef.current = true
+      }
+
+      if (retro && glCanvas) {
+        retro.render(canvas, { ...DEFAULT_RETRO, time: performance.now() / 1000 })
+      }
+      rafRef.current = requestAnimationFrame(draw)
+      return
+    }
 
     // ── Detect game events ────────────────────────────────────────────────────
     const hp    = ls.player.health
@@ -407,6 +646,11 @@ export function GameScreen({ runId, onBack }: Props) {
       }
     }
 
+    // Draw exit portal (persists after intro ends)
+    if (portalRef.current) {
+      drawPortal(ctx, (COLS - 4) * TILE + ox, 9 * TILE + oy, t, 1)
+    }
+
     // Draw captain
     const sheet = spriteRef.current
     if (sheet) {
@@ -442,7 +686,6 @@ export function GameScreen({ runId, onBack }: Props) {
     // ── Boss: Cosmic Dancer — appears at end of every round ───────────────────
     const bossSheet = bossSheetRef.current
     const boss = bossStateRef.current
-    const score = Number((ls.playerState >> BigInt(0)) & BigInt(0xFFFFFFFFFFFFFF))
     // Trigger boss every 5 gems collected (score increments by 10 per gem)
     const roundEnd = score > 0 && score % 50 === 0
     if (roundEnd && !boss.active) {
