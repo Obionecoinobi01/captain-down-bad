@@ -5,8 +5,9 @@
  * Captain falls from sky, dialogue bubble types out.
  * On completion: calls bridge.onIntroEnd() then starts GameScene.
  *
- * All drawing is manual Canvas 2D via Phaser's CANVAS renderer context —
- * same pattern as GameScene, no Phaser display objects needed.
+ * IMPORTANT: all Canvas 2D drawing must happen in the scene's 'postrender'
+ * event (not in update()), because Phaser clears the canvas AFTER update()
+ * runs during its own render pass. Same pattern as GameScene.
  */
 import Phaser from 'phaser'
 import { LEVEL_MAP, LEVEL_WIDTH, LEVEL_HEIGHT } from '../physics'
@@ -87,10 +88,14 @@ interface GemSparkle {
 export class IntroScene extends Phaser.Scene {
   private bridge!: GameBridge
 
-  private introFrame    = 0
-  private gemSparkles:  GemSparkle[]  = []
+  private introFrame     = 0
+  private gemSparkles:   GemSparkle[] = []
   private dustParticles: Particle[]   = []
-  private enemyDrops:   EnemyDrop[]   = []
+  private enemyDrops:    EnemyDrop[]  = []
+
+  // Snapshot for postrender (Euphoria's screen position this frame)
+  private _eupWX   = 0
+  private _bAlpha  = 1
 
   constructor(bridge: GameBridge) {
     super({ key: 'IntroScene' })
@@ -99,44 +104,125 @@ export class IntroScene extends Phaser.Scene {
 
   // ── preload ──────────────────────────────────────────────────────────────────
   preload() {
-    // Background image — same key as GameScene so it's only fetched once
     this.load.image('bg', '/img/background_new.png')
   }
 
   // ── create ───────────────────────────────────────────────────────────────────
   create() {
-    // All drawing is manual Canvas2D in update() — no Phaser display objects needed
+    // All drawing happens in postrender — AFTER Phaser clears the canvas.
+    this.events.on('postrender', this._onPostRender, this)
   }
 
-  // ── update ───────────────────────────────────────────────────────────────────
+  // ── update — state/physics only, NO canvas drawing ───────────────────────────
   update() {
-    const renderer = this.sys.game.renderer as Phaser.Renderer.Canvas.CanvasRenderer
-    const ctx = renderer.currentContext
-    if (!ctx) return
-
     this.introFrame++
-    const f = this.introFrame
-
-    // Advance global frame counter (IntroScene owns it during intro)
     this.bridge.frame.current++
-    const t = this.bridge.frame.current
 
+    const f  = this.introFrame
     const ls = this.bridge.getState()
-    ctx.imageSmoothingEnabled = false
 
-    // ── Camera pan ────────────────────────────────────────────────────────────
-    const CAM_MAX = (COLS - VIEWPORT_W) * TILE   // 192px max scroll
+    // Camera pan amount (pure calculation, used in postrender)
+    const CAM_MAX = (COLS - VIEWPORT_W) * TILE
     let camX = 0
     if (f >= 20 && f < 280) {
       camX = Math.min(CAM_MAX, ((f - 20) / 260) * CAM_MAX)
     } else if (f >= 280 && f < 360) {
       camX = CAM_MAX
     } else if (f >= 360 && f < 480) {
-      const p      = (f - 360) / 120
-      const eased  = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2
+      const p     = (f - 360) / 120
+      const eased = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2
       camX = CAM_MAX * (1 - eased)
     }
-    const ox = -camX  // pixel offset applied to world-space x positions
+    // Store world-space Euphoria x for postrender drawing
+    const flyT      = Math.min(1, (f - 20) / 260)
+    this._eupWX     = (1 + flyT * (COLS - 7)) * TILE
+    this._bAlpha    = f > 360 ? Math.max(0, 1 - (f - 360) / 60) : 1
+    void camX  // used directly in postrender via introFrame
+
+    // Spawn gem sparkle trail (Euphoria drops gems while flying)
+    if (f >= 20 && f < 300 && f % 40 === 20) {
+      const eupY = 3 * TILE + Math.sin(f * 0.05) * TILE * 0.5
+      this.gemSparkles.push({ x: this._eupWX + TILE, y: eupY + TILE * 2.5, age: 0 })
+    }
+
+    // Spawn enemy drops from Euphoria
+    if (f === 124 && this.enemyDrops.length === 0) {
+      const eupY = 3 * TILE + Math.sin(f * 0.05) * TILE * 0.5
+      this.enemyDrops.push({
+        x: this._eupWX, y: eupY + TILE * 2, targetY: 8 * TILE, vy: 0, age: 0, sheet: 0,
+      })
+    }
+    if (f === 166 && this.enemyDrops.length < 2) {
+      const eupY = 3 * TILE + Math.sin(f * 0.05) * TILE * 0.5
+      this.enemyDrops.push({
+        x: this._eupWX, y: eupY + TILE * 2, targetY: 14 * TILE, vy: 0, age: 0, sheet: 1,
+      })
+    }
+
+    // Advance enemy drop physics
+    for (const drop of this.enemyDrops) {
+      drop.age++
+      if (drop.y < drop.targetY) {
+        drop.vy  += 0.5
+        drop.y   += drop.vy
+        if (drop.y >= drop.targetY) { drop.y = drop.targetY; drop.vy = 0 }
+      }
+    }
+
+    // Advance gem sparkles
+    this.gemSparkles = this.gemSparkles.filter(sp => sp.age < 50)
+    for (const sp of this.gemSparkles) sp.age++
+
+    // Spawn + advance dust particles (captain impact at f=510)
+    if (f === 510) {
+      const cLandX = 2 * TILE
+      const cLandY = (ls.player.posY - 1) * TILE   // just above ground row
+      for (let d = 0; d < 14; d++) {
+        const angle = (d / 14) * Math.PI * 2
+        this.dustParticles.push({
+          x: cLandX + TILE / 2, y: cLandY,
+          vx: Math.cos(angle) * (0.8 + Math.random() * 1.5),
+          vy: Math.sin(angle) * (0.8 + Math.random() * 1.5) - 1.5,
+          age: 0,
+        })
+      }
+    }
+    for (const p of this.dustParticles) {
+      p.x += p.vx; p.y += p.vy; p.vy += 0.25; p.age++
+    }
+
+    // End intro → switch to GameScene
+    if (f >= 700) {
+      this.bridge.onIntroEnd()
+      this.scene.start('GameScene', { bridge: this.bridge })
+    }
+  }
+
+  // ── postrender — all Canvas 2D drawing ───────────────────────────────────────
+  private _onPostRender() {
+    const renderer = this.sys.game.renderer as Phaser.Renderer.Canvas.CanvasRenderer
+    const ctx = renderer.currentContext
+    if (!ctx) return
+
+    const f  = this.introFrame
+    const t  = this.bridge.frame.current
+    const ls = this.bridge.getState()
+
+    ctx.imageSmoothingEnabled = false
+
+    // ── Camera offset ────────────────────────────────────────────────────────
+    const CAM_MAX = (COLS - VIEWPORT_W) * TILE
+    let camX = 0
+    if (f >= 20 && f < 280) {
+      camX = Math.min(CAM_MAX, ((f - 20) / 260) * CAM_MAX)
+    } else if (f >= 280 && f < 360) {
+      camX = CAM_MAX
+    } else if (f >= 360 && f < 480) {
+      const p     = (f - 360) / 120
+      const eased = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2
+      camX = CAM_MAX * (1 - eased)
+    }
+    const ox = -camX
 
     // ── Background ────────────────────────────────────────────────────────────
     const bgTex = this.textures.exists('bg') ? this.textures.get('bg') : null
@@ -174,37 +260,15 @@ export class IntroScene extends Phaser.Scene {
     // ── Euphoria flies L→R (f 20–420) ────────────────────────────────────────
     const bossCanvas = this.bridge.sprites.boss.current
     if (bossCanvas && f >= 20 && f < 420) {
-      const flyT  = Math.min(1, (f - 20) / 260)
-      const eupWX = (1 + flyT * (COLS - 7)) * TILE  // world-space x
-      const eupSX = eupWX + ox                       // screen x
+      const eupSX = this._eupWX + ox
       const eupY  = 3 * TILE + Math.sin(f * 0.05) * TILE * 0.5
-
-      // Gem sparkles trail
-      if (f % 40 === 20 && f < 300) {
-        this.gemSparkles.push({ x: eupWX + TILE, y: eupY + TILE * 2.5, age: 0 })
-      }
-
-      // Drop troll (enemy 0) at f=124
-      if (f === 124 && this.enemyDrops.length === 0) {
-        this.enemyDrops.push({
-          x: eupWX, y: eupY + TILE * 2, targetY: 8 * TILE, vy: 0, age: 0, sheet: 0,
-        })
-      }
-      // Drop demon (enemy 1) at f=166
-      if (f === 166 && this.enemyDrops.length < 2) {
-        this.enemyDrops.push({
-          x: eupWX, y: eupY + TILE * 2, targetY: 14 * TILE, vy: 0, age: 0, sheet: 1,
-        })
-      }
-
       const BOSS_W = SPR_W * 3
       const BOSS_H = SPR_H * 3
       const bcw    = bossCanvas.width  / 3
       const bch    = bossCanvas.height / 4
       const bcol   = Math.floor(t / 10) % 3
-      const bAlpha = f > 360 ? Math.max(0, 1 - (f - 360) / 60) : 1
       const pulse  = (Math.sin(t * 0.1) + 1) * 0.5
-      ctx.globalAlpha = bAlpha
+      ctx.globalAlpha = this._bAlpha
       ctx.shadowColor = '#9933ff'
       ctx.shadowBlur  = 12 + pulse * 10
       ctx.drawImage(bossCanvas, bcol * bcw, 1 * bch, bcw, bch,
@@ -214,9 +278,7 @@ export class IntroScene extends Phaser.Scene {
     }
 
     // ── Gem sparkles ──────────────────────────────────────────────────────────
-    this.gemSparkles = this.gemSparkles.filter(sp => sp.age < 50)
     for (const sp of this.gemSparkles) {
-      sp.age++
       ctx.globalAlpha = Math.max(0, 1 - sp.age / 50)
       ctx.fillStyle   = '#00ffcc'
       ctx.shadowColor = '#00ffcc'
@@ -226,14 +288,9 @@ export class IntroScene extends Phaser.Scene {
       ctx.globalAlpha = 1
     }
 
-    // ── Enemy drops — fall from Euphoria to patrol rows ───────────────────────
+    // ── Enemy drops ───────────────────────────────────────────────────────────
     for (const drop of this.enemyDrops) {
-      drop.age++
-      drop.vy  += 0.5
-      drop.y   += drop.vy
-      const landed = drop.y >= drop.targetY
-      if (landed) { drop.y = drop.targetY; drop.vy = 0 }
-
+      const landed  = drop.y >= drop.targetY
       const eCanvas = drop.sheet === 1
         ? this.bridge.sprites.enemyDemon.current
         : this.bridge.sprites.enemyTroll.current
@@ -247,19 +304,19 @@ export class IntroScene extends Phaser.Scene {
           drop.x + ox - SPR_W / 2, drop.y - SPR_H + TILE, SPR_W, SPR_H)
         ctx.shadowBlur = 0
         // Impact ring on landing
-        if (landed && drop.vy === 0 && drop.age < 5) {
+        if (landed && drop.age < 10) {
           ctx.strokeStyle = `rgba(255,68,170,0.7)`
           ctx.lineWidth   = 2
           ctx.beginPath()
-          ctx.arc(drop.x + ox, drop.targetY, TILE * 1.5 * (drop.age / 5), 0, Math.PI * 2)
+          ctx.arc(drop.x + ox, drop.targetY, TILE * 1.5 * (drop.age / 10), 0, Math.PI * 2)
           ctx.stroke()
         }
       }
     }
 
-    // ── Captain falls from sky at (2, 8) — frames 480–510 ────────────────────
+    // ── Captain falls from sky at (2, ~14) — frames 480–510 ──────────────────
     const cLandX = 2 * TILE
-    const cLandY = 8 * TILE
+    const cLandY = 14 * TILE
     if (f >= 480 && f < 510) {
       const sp = (f - 480) / 30
       const sy = -TILE * 2 + (cLandY + TILE * 2) * sp
@@ -275,21 +332,8 @@ export class IntroScene extends Phaser.Scene {
     }
 
     if (f >= 510) {
-      // Spawn impact dust on first landing frame
-      if (this.dustParticles.length === 0) {
-        for (let d = 0; d < 14; d++) {
-          const angle = (d / 14) * Math.PI * 2
-          this.dustParticles.push({
-            x: cLandX + TILE / 2, y: cLandY,
-            vx: Math.cos(angle) * (0.8 + Math.random() * 1.5),
-            vy: Math.sin(angle) * (0.8 + Math.random() * 1.5) - 1.5,
-            age: 0,
-          })
-        }
-      }
-      // Advance + draw dust
+      // Dust particles
       for (const p of this.dustParticles) {
-        p.x += p.vx; p.y += p.vy; p.vy += 0.25; p.age++
         if (p.age < 35) {
           ctx.globalAlpha = Math.max(0, 1 - p.age / 35)
           ctx.fillStyle   = '#aaccff'
@@ -330,7 +374,7 @@ export class IntroScene extends Phaser.Scene {
         ctx.shadowBlur = 0
       }
 
-      // Dialogue bubble with typewriter effect (f 600–700)
+      // Dialogue bubble (f 600–700)
       if (f >= 600) {
         this._drawDialogue(ctx, cLandX, cLandY, f)
       }
@@ -341,15 +385,9 @@ export class IntroScene extends Phaser.Scene {
       ctx.fillStyle = `rgba(0,0,0,${Math.max(0, 1 - f / 20)})`
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H)
     }
-
-    // ── End intro at f=700 ────────────────────────────────────────────────────
-    if (f >= 700) {
-      this.bridge.onIntroEnd()
-      this.scene.start('GameScene', { bridge: this.bridge })
-    }
   }
 
-  // ── Portal (mirrors original drawPortal helper) ───────────────────────────
+  // ── Portal ────────────────────────────────────────────────────────────────
   private _drawPortal(
     ctx: CanvasRenderingContext2D,
     x: number, y: number,
@@ -377,7 +415,7 @@ export class IntroScene extends Phaser.Scene {
     ctx.globalAlpha = 1
   }
 
-  // ── Captain idle frame (first walk frame, facing right) ───────────────────
+  // ── Captain idle (first walk frame) ──────────────────────────────────────
   private _drawCaptainIdle(
     ctx: CanvasRenderingContext2D,
     sheet: HTMLCanvasElement,
@@ -404,20 +442,17 @@ export class IntroScene extends Phaser.Scene {
     const bx = Math.min(CANVAS_W - 158, Math.max(2, cLandX - 74))
     const by = cLandY - SPR_H - 40
     ctx.globalAlpha = dAlpha
-    // Box
     ctx.fillStyle   = 'rgba(0,0,0,0.88)'
     ctx.strokeStyle = '#4499ff'
     ctx.lineWidth   = 1.5
     ctx.beginPath()
     ctx.rect(bx, by, 154, 33)
     ctx.fill(); ctx.stroke()
-    // Text
     ctx.fillStyle = '#ffffff'
     ctx.font      = '7px monospace'
     ctx.textAlign = 'left'
     ctx.fillText(dispText.slice(0, 25), bx + 5, by + 12)
     if (dispText.length > 25) ctx.fillText(dispText.slice(25), bx + 5, by + 24)
-    // Bubble tail
     ctx.fillStyle   = 'rgba(0,0,0,0.88)'
     ctx.strokeStyle = '#4499ff'
     ctx.beginPath()

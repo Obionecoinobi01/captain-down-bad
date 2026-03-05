@@ -14,7 +14,7 @@ export type SessionKeyStatus =
   | 'ready'         // authorized + funded — game can start
   | 'error'
 
-const STORAGE_KEY = (runId: bigint) => `cdb_sk_${runId.toString()}`
+const STORAGE_KEY = (runId: bigint) => `cdb_sk_${CONTRACT_ADDRESS}_${runId.toString()}`
 
 // 0.001 ETH — enough for ~100+ moves at typical Base Sepolia gas prices
 const SESSION_KEY_FUND = parseEther('0.001')
