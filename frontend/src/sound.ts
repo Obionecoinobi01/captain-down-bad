@@ -95,6 +95,13 @@ export function playJump() {
   osc(180, 'square', t, 0.18, 0.22, 580)
 }
 
+/** Player lands from a jump — impact thud. */
+export function playLand() {
+  const t = boot().ctx.currentTime
+  noise(t, 0.06, 0.40)
+  osc(90, 'sine', t, 0.09, 0.28, 38)
+}
+
 /** Punch lands — sharp noise thud + pitch drop. */
 export function playPunch() {
   const t = boot().ctx.currentTime
@@ -109,6 +116,14 @@ export function playKick() {
   osc(120, 'square', t, 0.10, 0.28, 45)
 }
 
+/** Combo hit — escalating pitch blip based on hit count (1→6+). */
+export function playComboHit(n: number) {
+  const t    = boot().ctx.currentTime
+  const freq = 440 * Math.pow(1.15, Math.min(n - 1, 5))
+  osc(freq,          'square', t,        0.05, 0.30)
+  osc(freq * 1.5,    'square', t + 0.04, 0.04, 0.20)
+}
+
 /** Player takes damage — descending wail + noise. */
 export function playHurt() {
   const t = boot().ctx.currentTime
@@ -117,11 +132,27 @@ export function playHurt() {
   noise(t, 0.09, 0.20)
 }
 
+/** Spike hit — sharp electric zap (distinct from punch damage). */
+export function playSpike() {
+  const t = boot().ctx.currentTime
+  osc(880, 'sawtooth', t,        0.03, 0.40, 110)
+  osc(660, 'sawtooth', t + 0.03, 0.08, 0.30, 80)
+  noise(t, 0.12, 0.30)
+}
+
 /** Enemy defeated — rising arpeggio C4→E4→G4→C5. */
 export function playEnemyDefeat() {
   const t = boot().ctx.currentTime
   ;[262, 330, 392, 523].forEach((f, i) =>
     osc(f, 'square', t + i * 0.07, 0.10, 0.32),
+  )
+}
+
+/** Portal opens — shimmery ascending shimmer. */
+export function playPortalOpen() {
+  const t = boot().ctx.currentTime
+  ;[523, 659, 784, 1047, 1319].forEach((f, i) =>
+    osc(f, 'sine', t + i * 0.08, 0.22, 0.24 - i * 0.02),
   )
 }
 
@@ -155,21 +186,29 @@ export function playUIClick() {
 }
 
 // ── Music engine ───────────────────────────────────────────────────────────────
-// Driving Am chiptune: 4-bar loop, bass + lead + drums.
-// intro mode (BPM 132) = chill title vibe
-// game  mode (BPM 148) = combat intensity
+// Level 0 "Flat City":  Am groove,  4-bar loop, BPM 148
+// Level 1 "Sky Towers": Dm groove,  4-bar loop, BPM 160 (darker, more intense)
+// Intro:                Am groove,  slower BPM 132
 
 const NOTE: Record<string, number> = {
-  A2: 110.0, C3: 130.8, D3: 146.8, E3: 164.8, F3: 174.6, G3: 196.0,
-  A3: 220.0, B3: 246.9, C4: 261.6, D4: 293.7, E4: 329.6,
-  F4: 349.2, G4: 392.0, A4: 440.0,
+  // Octave 2
+  D2: 73.4, A2: 110.0, Bb2: 116.5,
+  // Octave 3
+  C3: 130.8, D3: 146.8, E3: 164.8, F3: 174.6, G3: 196.0,
+  A3: 220.0, Bb3: 233.1, B3: 246.9,
+  // Octave 4
+  C4: 261.6, D4: 293.7, E4: 329.6, F4: 349.2, G4: 392.0, A4: 440.0, Bb4: 466.2,
+  // Octave 5
+  C5: 523.3, D5: 587.3,
 }
 
 // Step = [frequency_hz, sixteenth_notes, volume]
 type Step = [number, number, number]
 
+// ── Level 0 / Intro: Am groove ────────────────────────────────────────────────
+
 // Bass — 4 bars of Am groove (64 sixteenth notes total)
-const BASS: Step[] = [
+const BASS_AM: Step[] = [
   // Bar 1  Am
   [NOTE.A2, 4, 0.30], [NOTE.E3, 2, 0.26], [NOTE.A2, 2, 0.28],
   [NOTE.C3, 4, 0.28], [NOTE.E3, 4, 0.30],
@@ -185,7 +224,7 @@ const BASS: Step[] = [
 ]
 
 // Lead melody — same 4-bar span
-const LEAD: Step[] = [
+const LEAD_AM: Step[] = [
   // Bar 1
   [NOTE.E4, 2, 0.26], [NOTE.D4, 2, 0.22], [NOTE.C4, 2, 0.24], [NOTE.A3, 2, 0.26],
   [NOTE.C4, 2, 0.24], [NOTE.D4, 2, 0.24], [NOTE.E4, 2, 0.26], [NOTE.A4, 2, 0.30],
@@ -199,6 +238,41 @@ const LEAD: Step[] = [
   [NOTE.G4, 2, 0.26], [NOTE.F4, 2, 0.22], [NOTE.E4, 2, 0.26], [NOTE.D4, 2, 0.22],
   [NOTE.C4, 2, 0.24], [NOTE.B3, 2, 0.22], [NOTE.A3, 4, 0.30],
 ]
+
+// ── Level 1 "Sky Towers": Dm groove ───────────────────────────────────────────
+// Darker, more vertical feel — D minor, 160 BPM, faster arpeggiated bass.
+
+const BASS_DM: Step[] = [
+  // Bar 1  Dm
+  [NOTE.D2,  4, 0.32], [NOTE.A2,  2, 0.28], [NOTE.D2,  2, 0.30],
+  [NOTE.F3,  4, 0.30], [NOTE.A2,  4, 0.32],
+  // Bar 2  Bb → F
+  [NOTE.Bb2, 4, 0.30], [NOTE.F3,  2, 0.26], [NOTE.Bb2, 2, 0.28],
+  [NOTE.F3,  4, 0.28], [NOTE.C3,  4, 0.32],
+  // Bar 3  Dm → A
+  [NOTE.D2,  4, 0.32], [NOTE.A2,  4, 0.30],
+  [NOTE.D2,  4, 0.30], [NOTE.A2,  4, 0.32],
+  // Bar 4  Bb → Dm
+  [NOTE.Bb2, 4, 0.30], [NOTE.C3,  4, 0.28],
+  [NOTE.D2,  8, 0.34],
+]
+
+const LEAD_DM: Step[] = [
+  // Bar 1
+  [NOTE.A4,  2, 0.26], [NOTE.G4,  2, 0.22], [NOTE.F4,  2, 0.24], [NOTE.D4, 2, 0.26],
+  [NOTE.F4,  2, 0.24], [NOTE.G4,  2, 0.24], [NOTE.A4,  2, 0.26], [NOTE.C5, 2, 0.30],
+  // Bar 2
+  [NOTE.Bb4, 2, 0.26], [NOTE.A4,  2, 0.22], [NOTE.G4,  2, 0.26], [NOTE.F4, 2, 0.22],
+  [NOTE.E4,  2, 0.24], [NOTE.D4,  2, 0.22], [NOTE.C4,  4, 0.28],
+  // Bar 3
+  [NOTE.A4,  2, 0.26], [NOTE.G4,  2, 0.22], [NOTE.F4,  2, 0.24], [NOTE.D4, 2, 0.26],
+  [NOTE.A4,  2, 0.26], [NOTE.C5,  2, 0.26], [NOTE.D5,  4, 0.32],
+  // Bar 4
+  [NOTE.C5,  2, 0.26], [NOTE.Bb4, 2, 0.22], [NOTE.A4,  2, 0.26], [NOTE.G4, 2, 0.22],
+  [NOTE.F4,  2, 0.24], [NOTE.E4,  2, 0.22], [NOTE.D4,  4, 0.30],
+]
+
+// ── Scheduler ─────────────────────────────────────────────────────────────────
 
 function scheduleSteps(steps: Step[], start: number, bpm: number, type: OscType, dest: AudioNode) {
   const sixteenth = (60 / bpm) / 4
@@ -232,13 +306,13 @@ function scheduleDrums(start: number, bpm: number, bars: number, dest: AudioNode
   }
 }
 
-function schedulePattern(startAt: number, bpm: number) {
+function schedulePattern(startAt: number, bpm: number, bass: Step[], lead: Step[]) {
   if (!_musicActive) return
   const { ctx, music } = boot()
   const bars = 4
 
-  scheduleSteps(BASS, startAt, bpm, 'square', music)
-  scheduleSteps(LEAD, startAt, bpm, 'square', music)
+  scheduleSteps(bass, startAt, bpm, 'square', music)
+  scheduleSteps(lead, startAt, bpm, 'square', music)
   scheduleDrums(startAt, bpm, bars, music)
 
   // Loop duration in seconds
@@ -247,18 +321,24 @@ function schedulePattern(startAt: number, bpm: number) {
 
   // Re-schedule 200 ms before loop end so there's no gap
   const delay   = Math.max(0, (nextAt - ctx.currentTime - 0.2) * 1000)
-  _musicLoop = setTimeout(() => schedulePattern(nextAt, bpm), delay)
+  _musicLoop = setTimeout(() => schedulePattern(nextAt, bpm, bass, lead), delay)
 }
 
 /** Start the background music.
- *  @param variant  'intro' (slower, relaxed) | 'game' (faster, intense) */
-export function startMusic(variant: 'intro' | 'game' = 'intro') {
+ *  @param variant  'intro' (slower Am) | 'game' (Am, BPM 148) | 'level2' (Dm, BPM 160) */
+export function startMusic(variant: 'intro' | 'game' | 'level2' = 'intro') {
   if (_musicActive) return
   _musicActive = true
   const { ctx, music } = boot()
   music.gain.setValueAtTime(0, ctx.currentTime)
   music.gain.linearRampToValueAtTime(0.30, ctx.currentTime + 0.8)  // fade in
-  schedulePattern(ctx.currentTime + 0.05, variant === 'game' ? 148 : 132)
+
+  const bpm  = variant === 'intro'  ? 132
+             : variant === 'level2' ? 160
+             : 148
+  const bass = variant === 'level2' ? BASS_DM : BASS_AM
+  const lead = variant === 'level2' ? LEAD_DM : LEAD_AM
+  schedulePattern(ctx.currentTime + 0.05, bpm, bass, lead)
 }
 
 /** Stop procedural music with a short fade-out. */

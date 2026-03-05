@@ -3,7 +3,10 @@ import Phaser from 'phaser'
 import { initRetroGL, DEFAULT_RETRO, type RetroGL } from './effects'
 import {
   startMusic, stopMusic,
-  playJump, playPunch, playKick,
+  playJump, playPunch, playKick, playLand,
+  playGemCollect, playHurt, playEnemyDefeat,
+  playWin, playGameOver, playPortalOpen,
+  playComboHit,
 } from './sound'
 import { useRun, useGemEventFetcher } from './useGameState'
 import { useSessionKey } from './useSessionKey'
@@ -101,9 +104,10 @@ export function GameScreen({ runId, levelId = 0, onBack }: Props) {
   const canvasRef   = useRef<HTMLCanvasElement>(null)   // Canvas 2D — hidden, Phaser renders here
   const glCanvasRef = useRef<HTMLCanvasElement>(null)   // WebGL — visible display
   const glStateRef  = useRef<RetroGL | null>(null)
-  const frameRef    = useRef(0)
-  const localRef    = useRef(localState)
-  localRef.current  = localState
+  const frameRef     = useRef(0)
+  const localRef     = useRef(localState)
+  localRef.current   = localState
+  const prevLocalRef = useRef(localState)
 
   // ── Sprite refs (loaded async, passed to Phaser via bridge) ───────────────────
   const spriteRef     = useRef<HTMLCanvasElement | null>(null)   // captain walk
@@ -134,11 +138,11 @@ export function GameScreen({ runId, levelId = 0, onBack }: Props) {
     return () => { glStateRef.current?.dispose(); glStateRef.current = null }
   }, [])
 
-  // Game music
+  // Game music — level 1 gets its own Dm track
   useEffect(() => {
-    startMusic('game')
+    startMusic(levelId > 0 ? 'level2' : 'game')
     return () => stopMusic()
-  }, [])
+  }, [levelId])
 
   // Load sprite sheets (background removal) — results stored in refs for bridge
   useEffect(() => {
@@ -148,6 +152,34 @@ export function GameScreen({ runId, levelId = 0, onBack }: Props) {
     loadSpriteSheet('/img/sprites/enemy_demon_new.png').then(c  => { demonSheetRef.current = c })
     loadSpriteSheet('/img/sprites/boss_dancer.png').then(c      => { bossSheetRef.current  = c })
   }, [])
+
+  // ── SFX: fire on local state transitions ──────────────────────────────────────
+  useEffect(() => {
+    const prev = prevLocalRef.current
+    const curr = localState
+
+    // Gem collected
+    if (curr.clearedTiles.size > prev.clearedTiles.size) playGemCollect()
+
+    // Enemy defeated
+    if (curr.enemiesDefeated > prev.enemiesDefeated) playEnemyDefeat()
+
+    // Player hurt (health dropped)
+    if (curr.player.health < prev.player.health) playHurt()
+
+    // Landing from a jump: velY was ≤ -2 (falling) → 0 (landed)
+    // Threshold -2 avoids the normal ground-idle tick where velY briefly hits -1
+    if (prev.player.velY <= -2 && curr.player.velY === 0) playLand()
+
+    // Run ended
+    if (prev.active && !curr.active) {
+      stopMusic()
+      if (curr.won) { playWin(); playPortalOpen() }
+      else            playGameOver()
+    }
+
+    prevLocalRef.current = curr
+  }, [localState])
 
   // Flush queue when run ends
   useEffect(() => {
@@ -198,6 +230,7 @@ export function GameScreen({ runId, levelId = 0, onBack }: Props) {
                               : move === Move.Kick ? 6
                               : 3 + Math.min(combo.count, 3)
           hitSparkRef.current = { tx: hitEnemy.posX, ty: hitEnemy.posY, combo: combo.count }
+          playComboHit(combo.count)
           if (isFinisher) {
             requestShakeRef.current = { intensity: 0.009, duration: 180 }
           }
