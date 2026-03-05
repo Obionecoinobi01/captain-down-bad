@@ -13,8 +13,10 @@ import {
   buildInitialState,
   packState,
   unpackState,
+  getLevel,
   type Move,
   type PlayerState,
+  type LevelConfig,
 } from './physics'
 
 export interface LocalGameState {
@@ -48,9 +50,9 @@ export interface UseLocalPhysicsReturn {
   desynced:        boolean
 }
 
-function makeInitialLocalState(packed?: bigint): LocalGameState {
+function makeInitialLocalState(level: LevelConfig, packed?: bigint): LocalGameState {
   return {
-    player:          packed !== undefined ? unpackState(packed) : buildInitialState(),
+    player:          packed !== undefined ? unpackState(packed) : buildInitialState(level),
     clearedTiles:    new Set<number>(),
     enemiesDefeated: 0,
     tick:            0,
@@ -59,9 +61,16 @@ function makeInitialLocalState(packed?: bigint): LocalGameState {
   }
 }
 
-export function useLocalPhysics(initialPlayerState?: bigint): UseLocalPhysicsReturn {
+export function useLocalPhysics(
+  initialPlayerState?: bigint,
+  levelId = 0,
+): UseLocalPhysicsReturn {
+  const level = getLevel(levelId)
+  const levelRef = useRef<LevelConfig>(level)
+  levelRef.current = level
+
   const [localState, setLocalState] = useState<LocalGameState>(() =>
-    makeInitialLocalState(initialPlayerState)
+    makeInitialLocalState(level, initialPlayerState)
   )
   const [desynced, setDesynced] = useState(false)
 
@@ -73,7 +82,7 @@ export function useLocalPhysics(initialPlayerState?: bigint): UseLocalPhysicsRet
     const gs = stateRef.current
     if (!gs.active) return gs
 
-    const result = advanceTick(gs.player, gs.clearedTiles, move, gs.enemiesDefeated, gs.tick)
+    const result = advanceTick(gs.player, gs.clearedTiles, move, gs.enemiesDefeated, gs.tick, levelRef.current)
 
     const next: LocalGameState = {
       player:          result.state,
@@ -135,7 +144,7 @@ export function useLocalPhysics(initialPlayerState?: bigint): UseLocalPhysicsRet
   }, [])
 
   const reset = useCallback((packed?: bigint) => {
-    const fresh = makeInitialLocalState(packed)
+    const fresh = makeInitialLocalState(levelRef.current, packed)
     stateRef.current = fresh
     setLocalState(fresh)
     setDesynced(false)

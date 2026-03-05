@@ -157,11 +157,12 @@ function compileShader(gl: WebGLRenderingContext, type: number, src: string): We
 // ── initRetroGL ───────────────────────────────────────────────────────────────
 
 export function initRetroGL(canvas: HTMLCanvasElement): RetroGL {
-  const gl = canvas.getContext('webgl', { alpha: false, antialias: false })
-  if (!gl) {
+  const glRaw = canvas.getContext('webgl', { alpha: false, antialias: false })
+  if (!glRaw) {
     console.warn('[RetroGL] WebGL unavailable — effects disabled')
     return { render: () => {}, dispose: () => {} }
   }
+  const gl: WebGLRenderingContext = glRaw
 
   const prog = gl.createProgram()!
   gl.attachShader(prog, compileShader(gl, gl.VERTEX_SHADER,   VERT_SRC))

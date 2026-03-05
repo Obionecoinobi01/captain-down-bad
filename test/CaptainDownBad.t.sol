@@ -395,7 +395,15 @@ contract CaptainDownBadTest is Test {
     }
 
     function test_moveRight_atBoundary_stays() public {
-        uint256 runId = _startRun(PLAYER, BET, 0);
+        // Use a clean level: only ground wall at y=15, no spikes or enemies
+        bytes memory tiles = new bytes(LEVEL_W * LEVEL_H);
+        for (uint256 x = 0; x < LEVEL_W; x++) {
+            tiles[15 * LEVEL_W + x] = bytes1(uint8(1)); // WALL
+        }
+        vm.prank(OWNER);
+        game.setLevel(1, tiles, 4);
+
+        uint256 runId = _startRun(PLAYER, BET, 1);
         for (uint256 i; i < 29; i++) {
             _tick(runId, CaptainDownBad.Move.Right, PLAYER);
         }
@@ -410,7 +418,7 @@ contract CaptainDownBadTest is Test {
     function test_terminalVelocity_clamp() public {
         bytes memory tiles = new bytes(LEVEL_W * LEVEL_H); // all air
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -429,7 +437,7 @@ contract CaptainDownBadTest is Test {
     function test_collectGem_scoreIncreasesBy100() public {
         bytes memory tiles = _buildLevel(2, 15, 2); // TILE_GEM
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -445,7 +453,7 @@ contract CaptainDownBadTest is Test {
     function test_collectGem_perRunIsolation() public {
         bytes memory tiles = _buildLevel(2, 15, 2);
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runA = _startRun(PLAYER,  BET, 1);
         uint256 runB = _startRun(PLAYER2, BET, 1);
@@ -462,7 +470,7 @@ contract CaptainDownBadTest is Test {
     function test_collectGem_onlyOncePerRun() public {
         bytes memory tiles = _buildLevel(2, 15, 2);
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -482,7 +490,7 @@ contract CaptainDownBadTest is Test {
     function test_spikeDamage_reducesHealthBy1() public {
         bytes memory tiles = _buildLevel(2, 15, 3); // TILE_SPIKE
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
         _tick(runId, CaptainDownBad.Move.Idle, PLAYER);
@@ -494,7 +502,7 @@ contract CaptainDownBadTest is Test {
     function test_enemyDamage_reducesHealthBy1() public {
         bytes memory tiles = _buildLevel(2, 15, 4); // TILE_ENEMY
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
         _tick(runId, CaptainDownBad.Move.Idle, PLAYER);
@@ -510,7 +518,7 @@ contract CaptainDownBadTest is Test {
     function test_healthZero_runBecomesInactive() public {
         bytes memory tiles = _buildLevel(2, 15, 3);
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -524,7 +532,7 @@ contract CaptainDownBadTest is Test {
     function test_healthZero_betGoesToHouseFees() public {
         bytes memory tiles = _buildLevel(2, 15, 3);
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -538,7 +546,7 @@ contract CaptainDownBadTest is Test {
     function test_houseFees_neverExceedContractBalance() public {
         bytes memory tiles = _buildLevel(2, 15, 3);
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runA = _startRun(PLAYER,  BET, 1);
         uint256 runB = _startRun(PLAYER2, BET, 1);
@@ -616,7 +624,7 @@ contract CaptainDownBadTest is Test {
         vm.prank(OWNER);
         vm.expectEmit(true, false, false, false);
         emit CaptainDownBad.LevelSet(5);
-        game.setLevel(5, tiles);
+        game.setLevel(5, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 5);
         assertTrue(_isActive(runId));
@@ -625,19 +633,19 @@ contract CaptainDownBadTest is Test {
     function test_setLevel_wrongSize_reverts() public {
         vm.prank(OWNER);
         vm.expectRevert("CDB: wrong level size");
-        game.setLevel(1, new bytes(10));
+        game.setLevel(1, new bytes(10), 4);
     }
 
     function test_setLevel_notOwner_reverts() public {
         vm.prank(RANDO);
         vm.expectRevert();
-        game.setLevel(1, new bytes(LEVEL_W * LEVEL_H));
+        game.setLevel(1, new bytes(LEVEL_W * LEVEL_H), 4);
     }
 
     function test_claimHouseFees() public {
         bytes memory tiles = _buildLevel(2, 15, 3);
         vm.prank(OWNER);
-        game.setLevel(1, tiles);
+        game.setLevel(1, tiles, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
         for (uint256 i; i < 3; i++) {
@@ -692,7 +700,7 @@ contract CaptainDownBadTest is Test {
     function testFuzz_randomMoveSequence(uint256 seed) public {
         bytes memory tiles = new bytes(LEVEL_W * LEVEL_H); // all air
         vm.prank(OWNER);
-        game.setLevel(2, tiles);
+        game.setLevel(2, tiles, 4);
 
         uint256 totalDeposited;
 
@@ -803,7 +811,7 @@ contract CaptainDownBadTest is Test {
     function test_collectGemAndScore() public {
         bytes memory lvl = _buildLevel(2, 15, 2 /* TILE_GEM */);
         vm.prank(OWNER);
-        game.setLevel(1, lvl);
+        game.setLevel(1, lvl, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -820,7 +828,7 @@ contract CaptainDownBadTest is Test {
     function test_spikeDamage() public {
         bytes memory lvl = _buildLevel(2, 15, 3 /* TILE_SPIKE */);
         vm.prank(OWNER);
-        game.setLevel(1, lvl);
+        game.setLevel(1, lvl, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -841,7 +849,7 @@ contract CaptainDownBadTest is Test {
     function test_enemyPunchKO() public {
         bytes memory lvl = _buildLevel(2, 15, 4 /* TILE_ENEMY */);
         vm.prank(OWNER);
-        game.setLevel(1, lvl);
+        game.setLevel(1, lvl, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
 
@@ -880,7 +888,7 @@ contract CaptainDownBadTest is Test {
     function test_enemyKickKO_and_getTile_direct() public {
         bytes memory lvl = _buildLevel(2, 15, 4 /* TILE_ENEMY */);
         vm.prank(OWNER);
-        game.setLevel(1, lvl);
+        game.setLevel(1, lvl, 4);
 
         uint256 runId = _startRun(PLAYER, BET, 1);
         _tick(runId, CaptainDownBad.Move.Kick, PLAYER);
@@ -937,5 +945,140 @@ contract CaptainDownBadTest is Test {
         game.submitMove(runId, CaptainDownBad.Move.Idle);
         (,,, uint256 tick,,,) = game.runs(runId);
         assertEq(tick, 1, "new session key accepted");
+    }
+
+    // =========================================================================
+    // Enemy patrol — _enemyPosX() unit tests
+    //
+    // Enemy 0: pMin=8, pMax=14, spd=2, range=6
+    //   phase  = (tick / 2) % 12
+    //   offset = phase <= 6 ? phase : 12 - phase
+    //
+    // Enemy 1: pMin=6, pMax=24, spd=3, range=18
+    //   phase  = (tick / 3) % 36
+    //   offset = phase <= 18 ? phase : 36 - phase
+    // =========================================================================
+
+    function test_enemyPatrol_enemy0_specificTicks() public view {
+        assertEq(game.exposed_enemyPosX(0, 0),  8,  "tick=0:  at patrolMin");
+        assertEq(game.exposed_enemyPosX(0, 2),  9,  "tick=2:  step 1 right");
+        assertEq(game.exposed_enemyPosX(0, 4),  10, "tick=4:  step 2 right");
+        assertEq(game.exposed_enemyPosX(0, 12), 14, "tick=12: at patrolMax");
+        assertEq(game.exposed_enemyPosX(0, 14), 13, "tick=14: step 1 back");
+        assertEq(game.exposed_enemyPosX(0, 24), 8,  "tick=24: full cycle -> patrolMin");
+    }
+
+    function test_enemyPatrol_enemy1_specificTicks() public view {
+        assertEq(game.exposed_enemyPosX(1, 0),   6,  "tick=0:   at patrolMin");
+        assertEq(game.exposed_enemyPosX(1, 3),   7,  "tick=3:   step 1 right");
+        assertEq(game.exposed_enemyPosX(1, 54),  24, "tick=54:  at patrolMax");
+        assertEq(game.exposed_enemyPosX(1, 57),  23, "tick=57:  step 1 back");
+        assertEq(game.exposed_enemyPosX(1, 108), 6,  "tick=108: full cycle -> patrolMin");
+    }
+
+    function testFuzz_enemyPatrol_alwaysInBounds(uint256 tick) public view {
+        tick = bound(tick, 0, 10_000);
+        uint8 x0 = game.exposed_enemyPosX(0, tick);
+        assertGe(x0, 8,  "enemy0 posX never below patrolMin=8");
+        assertLe(x0, 14, "enemy0 posX never above patrolMax=14");
+        uint8 x1 = game.exposed_enemyPosX(1, tick);
+        assertGe(x1, 6,  "enemy1 posX never below patrolMin=6");
+        assertLe(x1, 24, "enemy1 posX never above patrolMax=24");
+    }
+
+    // =========================================================================
+    // Enemy defeat — Punch/Kick with ±1 reach
+    //
+    // At tick=0, enemy 0 is at (posX=8, posY=8).
+    // exposed_setPlayerXY teleports the player; velY stays 0 so gravity
+    // drives nextY = posY - (-1) = 9, which hits the platform (TILE_WALL at y=9,
+    // x=8..14), reverting posY back to 8. Player stays in row 8. ✓
+    // =========================================================================
+
+    function test_enemyDefeat_punchOnSameTile() public {
+        uint256 runId = _startRun(PLAYER, BET, 0);
+        game.exposed_setPlayerXY(runId, 8, 8); // same tile as enemy 0 at tick=0
+
+        vm.expectEmit(true, true, false, true);
+        emit CaptainDownBad.EnemyDefeated(runId, 0, uint256(game.ENEMY_SCORE()));
+
+        _tick(runId, CaptainDownBad.Move.Punch, PLAYER);
+
+        (,,, uint8 health,, uint56 score) = _unpack(_playerState(runId));
+        assertEq(score,  uint56(game.ENEMY_SCORE()), "score += ENEMY_SCORE on defeat");
+        assertEq(health, 3,                          "no self-damage when attacking");
+        assertEq(game.enemyDefeated(runId) & 1, 1,  "bit 0 set in defeat bitmask");
+    }
+
+    function test_enemyDefeat_kickOnSameTile() public {
+        uint256 runId = _startRun(PLAYER, BET, 0);
+        game.exposed_setPlayerXY(runId, 8, 8);
+
+        _tick(runId, CaptainDownBad.Move.Kick, PLAYER);
+
+        assertEq(game.enemyDefeated(runId) & 1, 1,  "kick defeats enemy on same tile");
+        (,,,,, uint56 score) = _unpack(_playerState(runId));
+        assertEq(score, uint56(game.ENEMY_SCORE()), "score += ENEMY_SCORE on kick defeat");
+    }
+
+    function test_enemyDefeat_punchFromAdjacentTile() public {
+        uint256 runId = _startRun(PLAYER, BET, 0);
+        game.exposed_setPlayerXY(runId, 9, 8); // dx=1 from enemy at x=8
+
+        _tick(runId, CaptainDownBad.Move.Punch, PLAYER);
+
+        assertEq(game.enemyDefeated(runId) & 1, 1, "punch from adjacent tile (dx=1) defeats enemy");
+    }
+
+    function test_enemyDefeat_punchTooFar_noDefeat() public {
+        uint256 runId = _startRun(PLAYER, BET, 0);
+        game.exposed_setPlayerXY(runId, 11, 8); // dx=3 from enemy at x=8 — out of ±1 reach
+
+        _tick(runId, CaptainDownBad.Move.Punch, PLAYER);
+
+        assertEq(game.enemyDefeated(runId) & 1, 0, "punch from dx=3 does not defeat enemy");
+    }
+
+    // =========================================================================
+    // Enemy damage — touching enemy tile without attacking
+    // =========================================================================
+
+    function test_enemyDamage_idleOnEnemyTile() public {
+        uint256 runId = _startRun(PLAYER, BET, 0);
+        game.exposed_setPlayerXY(runId, 8, 8); // exact tile of enemy 0 at tick=0
+
+        _tick(runId, CaptainDownBad.Move.Idle, PLAYER);
+
+        (,,, uint8 health,,) = _unpack(_playerState(runId));
+        assertEq(health, 2, "health 3->2 when touching enemy without attacking");
+    }
+
+    function test_enemyDamage_adjacentTile_noHarm() public {
+        uint256 runId = _startRun(PLAYER, BET, 0);
+        game.exposed_setPlayerXY(runId, 9, 8); // adjacent (dx=1) — damage zone is exact tile only
+
+        _tick(runId, CaptainDownBad.Move.Idle, PLAYER);
+
+        (,,, uint8 health,,) = _unpack(_playerState(runId));
+        assertEq(health, 3, "adjacent tile is safe for non-attacking moves");
+    }
+
+    // =========================================================================
+    // Defeated enemy persistence — no longer harms after bit set
+    // =========================================================================
+
+    function test_defeatedEnemy_noLongerHarms() public {
+        uint256 runId = _startRun(PLAYER, BET, 0);
+        game.exposed_setPlayerXY(runId, 8, 8);
+
+        // Defeat enemy 0 with Punch
+        _tick(runId, CaptainDownBad.Move.Punch, PLAYER);
+        assertEq(game.enemyDefeated(runId) & 1, 1, "enemy 0 defeated");
+
+        // Player stays at (8,8); idle on the same tile — defeat bit prevents damage
+        _tick(runId, CaptainDownBad.Move.Idle, PLAYER);
+
+        (,,, uint8 health,,) = _unpack(_playerState(runId));
+        assertEq(health, 3, "defeated enemy no longer harms the player");
     }
 }

@@ -175,6 +175,9 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
     /// @notice Level tile data: levelId → LEVEL_WIDTH*LEVEL_HEIGHT bytes.
     mapping(uint256 => bytes) public levels;
 
+    /// @notice Required gem count to win a custom level (levelId > 0).
+    mapping(uint256 => uint256) public levelGemCounts;
+
     /// @dev Per-run consumed tiles (gems collected). Avoids mutating shared level data.
     mapping(uint256 runId => mapping(uint256 tileIdx => bool)) private _cleared;
 
@@ -336,9 +339,23 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
         int16 nextY    = int16(uint16(posY)) - int16(velY);
         if (nextY < 0)                             nextY = 0;
         if (nextY >= int16(uint16(LEVEL_HEIGHT)))  nextY = int16(uint16(LEVEL_HEIGHT - 1));
+
+        // Sweep intermediate rows to prevent tunneling through platforms
+        if (velY != 0) {
+            int16 dir = velY < 0 ? int16(1) : int16(-1); // falling→+1, rising→-1
+            int16 iy  = int16(uint16(prevPosY)) + dir;
+            while ((dir > 0) ? iy <= nextY : iy >= nextY) {
+                if (_getTile(runId, posX, uint8(uint16(iy))) == TILE_WALL) {
+                    nextY = iy - dir; // stop just before wall
+                    velY  = 0;
+                    break;
+                }
+                iy += dir;
+            }
+        }
         posY = uint8(uint16(nextY));
 
-        // --- Tile collision ---
+        // --- Tile collision (destination effects: gem, spike, wall fallback) ---
         uint8 tile = _getTile(runId, posX, posY);
 
         if (tile == TILE_WALL) {
@@ -362,24 +379,26 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
 
         // --- Enemy collision (dynamic patrol, level 0 only) ---
         // Enemy positions are computed from the tick BEFORE increment (run.tick).
-        uint8 def = _defeated[runId];
-        for (uint8 i = 0; i < ENEMY_COUNT; i++) {
-            if ((def >> i) & 1 == 1) continue;                       // already defeated
-            uint8 ePosX = _enemyPosX(i, run.tick);
-            uint8 ePosY = i == 0 ? ENEMY_0_Y : ENEMY_1_Y;
-            if (move == Move.Punch || move == Move.Kick) {
-                // Attack has ±1 tile reach (player can punch from adjacent tile)
-                uint8 dx = posX >= ePosX ? posX - ePosX : ePosX - posX;
-                if (dx <= 1 && posY == ePosY) {
-                    _defeated[runId] = def | (uint8(1) << i);
-                    score += uint56(ENEMY_SCORE);
-                    emit EnemyDefeated(runId, i, uint256(score));
+        if (runs[runId].levelId == 0) {
+            uint8 def = _defeated[runId];
+            for (uint8 i = 0; i < ENEMY_COUNT; i++) {
+                if ((def >> i) & 1 == 1) continue;                       // already defeated
+                uint8 ePosX = _enemyPosX(i, run.tick);
+                uint8 ePosY = i == 0 ? ENEMY_0_Y : ENEMY_1_Y;
+                if (move == Move.Punch || move == Move.Kick) {
+                    // Attack has ±1 tile reach (player can punch from adjacent tile)
+                    uint8 dx = posX >= ePosX ? posX - ePosX : ePosX - posX;
+                    if (dx <= 1 && posY == ePosY) {
+                        _defeated[runId] = def | (uint8(1) << i);
+                        score += uint56(ENEMY_SCORE);
+                        emit EnemyDefeated(runId, i, uint256(score));
+                        break;
+                    }
+                } else if (posX == ePosX && posY == ePosY) {
+                    // Damage zone: exact tile only
+                    if (health > 0) health--;
                     break;
                 }
-            } else if (posX == ePosX && posY == ePosY) {
-                // Damage zone: exact tile only
-                if (health > 0) health--;
-                break;
             }
         }
 
@@ -398,10 +417,16 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
         // --- End conditions ---
         if (health == 0) { _endRun(runId, false); return; }
 
-        // Win: all Magical D gems collected this run (level 0 built-in map only).
-        if (runs[runId].levelId == 0 && _gemsCleared(runId) == LEVEL_0_GEM_COUNT) {
-            _endRun(runId, true);
-            return;
+        // Win: all Magical D gems collected this run.
+        {
+            uint256 levelId_     = runs[runId].levelId;
+            uint256 requiredGems = levelId_ == 0
+                ? LEVEL_0_GEM_COUNT
+                : levelGemCounts[levelId_];
+            if (requiredGems > 0 && _gemsCleared(runId) == requiredGems) {
+                _endRun(runId, true);
+                return;
+            }
         }
     }
 
@@ -547,12 +572,15 @@ contract CaptainDownBad is ReentrancyGuard, Ownable, Pausable {
 
     /**
      * @notice Load or replace a level. Only owner.
-     * @param levelId  Arbitrary level identifier.
+     * @param levelId  Arbitrary level identifier (must be > 0; level 0 is built-in).
      * @param tileData Exactly LEVEL_WIDTH * LEVEL_HEIGHT bytes of tile values (0-4).
+     * @param gemCount Number of gems the player must collect to win. 0 = endless run.
      */
-    function setLevel(uint256 levelId, bytes calldata tileData) external onlyOwner {
-        require(tileData.length == LEVEL_WIDTH * LEVEL_HEIGHT, "CDB: wrong level size");
-        levels[levelId] = tileData;
+    function setLevel(uint256 levelId, bytes calldata tileData, uint256 gemCount) external onlyOwner {
+        require(levelId > 0,                                              "CDB: cannot overwrite level 0");
+        require(tileData.length == LEVEL_WIDTH * LEVEL_HEIGHT,            "CDB: wrong level size");
+        levels[levelId]         = tileData;
+        levelGemCounts[levelId] = gemCount;
         emit LevelSet(levelId);
     }
 

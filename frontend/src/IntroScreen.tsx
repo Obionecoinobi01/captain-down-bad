@@ -6,7 +6,7 @@ import { useStartRun } from './useStartRun'
 import { startIntroTrack, stopIntroTrack, playUIClick } from './sound'
 
 interface Props {
-  onStart: (runId: bigint) => void
+  onStart: (runId: bigint, levelId: number) => void
 }
 
 const TX_LABEL: Record<string, string> = {
@@ -25,7 +25,8 @@ export function IntroScreen({ onStart }: Props) {
   const { disconnect } = useDisconnect()
   const { formatted: usdcBalance } = useUsdcBalance(address)
   const { startRun, status, runId, error, reset } = useStartRun(address)
-  const [bet, setBet] = useState('1.00')
+  const [bet, setBet]               = useState('1.00')
+  const [levelId, setLevelId]       = useState(0)
   const [showVideo, setShowVideo]   = useState(true)   // intro cinematic phase
   const [attracted, setAttracted]   = useState(true)   // attract / press-start phase
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -38,16 +39,16 @@ export function IntroScreen({ onStart }: Props) {
   useEffect(() => {
     if (status === 'done' && runId !== undefined) {
       stopIntroTrack()
-      const t = setTimeout(() => onStart(runId), 900)
+      const t = setTimeout(() => onStart(runId, levelId), 900)
       return () => clearTimeout(t)
     }
-  }, [status, runId, onStart])
+  }, [status, runId, onStart, levelId])
 
   const busy = status !== 'idle' && status !== 'done' && status !== 'error'
 
   function handleStart() {
     if (status === 'error') { reset(); return }
-    if (!busy && status !== 'done') startRun(bet)
+    if (!busy && status !== 'done') startRun(bet, BigInt(levelId))
   }
 
   const actionLabel = status === 'done' && runId !== undefined
@@ -139,6 +140,20 @@ export function IntroScreen({ onStart }: Props) {
                   onChange={e => { setBet(e.target.value); if (status === 'error') reset() }}
                   onClick={e => e.stopPropagation()}
                 />
+              </div>
+
+              <div className="intro-level-row">
+                <span className="intro-insert-label">STAGE:</span>
+                {[0, 1].map(lvl => (
+                  <button
+                    key={lvl}
+                    className={['intro-level-btn', levelId === lvl ? 'active' : ''].join(' ').trim()}
+                    disabled={busy || status === 'done'}
+                    onClick={e => { e.stopPropagation(); playUIClick(); setLevelId(lvl) }}
+                  >
+                    {lvl === 0 ? '1 — FLAT CITY' : '2 — SKY TOWERS'}
+                  </button>
+                ))}
               </div>
 
               {error && (

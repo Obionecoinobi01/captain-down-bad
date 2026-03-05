@@ -27,4 +27,24 @@ contract CaptainDownBadHarness is CaptainDownBad {
     function exposed_clearTileByXY(uint256 runId, uint8 x, uint8 y) external {
         _clearTile(runId, x, y);
     }
+
+    /// @dev Expose the internal patrol function for direct unit testing.
+    function exposed_enemyPosX(uint8 idx, uint256 tick) external pure returns (uint8) {
+        return _enemyPosX(idx, tick);
+    }
+
+    /// @dev Teleport the player to (posX, posY) without touching velY or other fields.
+    ///      Used to position the player next to a patrol enemy at a known tick.
+    function exposed_setPlayerXY(uint256 runId, uint8 posX, uint8 posY) external {
+        uint256 s = runs[runId].playerState;
+        s = (s & ~(uint256(0xff) << 248)) | (uint256(posX) << 248);
+        s = (s & ~(uint256(0xff) << 240)) | (uint256(posY) << 240);
+        runs[runId].playerState = s;
+    }
+
+    /// @dev Advance the run's tick counter directly (no physics applied).
+    ///      Lets tests assert enemy positions at arbitrary ticks.
+    function exposed_setTick(uint256 runId, uint256 tick) external {
+        runs[runId].tick = tick;
+    }
 }

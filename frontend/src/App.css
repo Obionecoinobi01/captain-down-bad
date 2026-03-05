@@ -285,6 +285,36 @@ body::after {
 .intro-bet-input:focus   { border-color: #00ffcc99; }
 .intro-bet-input:disabled { opacity: 0.4; }
 
+.intro-level-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.intro-level-btn {
+  padding: 0.35rem 0.7rem;
+  background: #00000088;
+  border: 1px solid #9933ff44;
+  border-radius: 2px;
+  color: #9966cc;
+  font-family: 'Press Start 2P', monospace;
+  font-size: 0.38rem;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.intro-level-btn:hover:not(:disabled) {
+  border-color: #9933ff88;
+  color: #cc88ff;
+}
+.intro-level-btn.active {
+  border-color: #9933ff;
+  color: #cc88ff;
+  box-shadow: 0 0 8px #9933ff66;
+}
+.intro-level-btn:disabled { opacity: 0.4; cursor: default; }
+
 .intro-error {
   font-size: 0.6rem;
   color: #ff4466;
@@ -583,6 +613,41 @@ body::after {
   font-size: clamp(0.5rem, 1.5vw, 0.75rem);
   color: #ffcc00;
   letter-spacing: 0.15em;
+}
+.game-over--win .game-over-title {
+  color: #ffd230;
+  text-shadow: 0 0 16px #ffd230, 0 0 40px #ffd23088;
+}
+.game-over--lose .game-over-title {
+  color: #ff4466;
+  text-shadow: 0 0 16px #ff4466, 0 0 40px #ff446688;
+}
+.game-over-payout {
+  font-family: 'Press Start 2P', monospace;
+  font-size: clamp(1rem, 3.5vw, 1.8rem);
+  color: #ffd230;
+  text-shadow: 0 0 12px #ffd23099;
+  letter-spacing: 0.08em;
+}
+.game-over-sub {
+  font-family: 'Press Start 2P', monospace;
+  font-size: clamp(0.4rem, 1.2vw, 0.6rem);
+  color: #aaaaaa;
+  letter-spacing: 0.1em;
+}
+.btn-win {
+  font-family: 'Press Start 2P', monospace;
+  font-size: clamp(0.55rem, 1.6vw, 0.8rem);
+  background: #ffd230;
+  color: #1a1000;
+  border: none;
+  padding: 0.6rem 1.4rem;
+  cursor: pointer;
+  letter-spacing: 0.08em;
+  transition: box-shadow 0.15s;
+}
+.btn-win:hover {
+  box-shadow: 0 0 14px #ffd23099;
 }
 
 /* ── Move pad ─────────────────────────────────────────────────────────── */
